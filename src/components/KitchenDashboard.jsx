@@ -1,266 +1,329 @@
-// src/components/KitchenDashboard.jsx
-
-import React, { useState } from 'react';
+import React, { useMemo, useCallback, useState, useEffect } from 'react';
 import { useRealTimeOrders } from '../hooks/useRealTimeOrders'; 
-// Ensure dispatchOrder is imported along with updateOrderStatus
 import { updateOrderStatus, dispatchOrder } from '../utils/orderActions'; 
 import { getStatusDetails } from '../utils/statusMapping'; 
+import { doc, updateDoc, onSnapshot, setDoc, getDoc, collection, query, orderBy } from 'firebase/firestore';
+import { db } from '../config/firebase';
 
-// --- KITCHEN CONSTANTS ---
-// Kitchen monitors: CONFIRMED (2), IN_PREP (3), READY (4), DISPATCHED (5)
 const KITCHEN_MONITORING_STATUSES = [2, 3, 4, 5]; 
 const CURRENT_KITCHEN_ID = "Kitchen_User_A"; 
-// -------------------------
 
-// --- Helper function for clear, consistent time formatting (FIXES REFERENCE ERROR) ---
+// Full Menu Reference for names in the Availability Manager
+const FULL_MENU_LIST = [
+    { id: 'B01', name: 'Plain Omelette' }, { id: 'B02', name: 'Cheese Omelette' },
+    { id: 'B03', name: 'Omelette with Hot Dogs' }, { id: 'B04', name: 'Omelette with Vegetables' },
+    { id: 'B05', name: 'Spanish Omelette' }, { id: 'B06', name: 'Plain Pizza' },
+    { id: 'B07', name: 'Pizza with Vegetables' }, { id: 'B08', name: 'Pizza with Hot Dogs' },
+    { id: 'B09', name: 'Hot Dogs Only' }, { id: 'LD01', name: 'Plain Pasta' },
+    { id: 'LD02', name: 'Pasta with Hot Dogs' }, { id: 'LD03', name: 'Pasta with Tuna/Sardines/Corned Beef' },
+    { id: 'LD04', name: 'Pasta with Chicken' }, { id: 'LD16', name: 'Plain Rice' },
+    { id: 'LD17', name: 'Fried Rice' }, { id: 'D01', name: 'Coke' },
+    { id: 'D02', name: 'Beta Malt' }, { id: 'D03', name: 'Fanta' }
+];
+
 const formatTime = (timestampOrDate) => {
-    if (!timestampOrDate) return 'N/A';
-    let date;
-    if (timestampOrDate.toDate) {
-        date = timestampOrDate.toDate(); 
-    } else {
-        date = timestampOrDate; 
+    if (!timestampOrDate) return '--:--';
+    try {
+        const date = timestampOrDate.toDate ? timestampOrDate.toDate() : new Date(timestampOrDate); 
+        return date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+    } catch (e) {
+        return '--:--';
     }
-    // Only shows hour and minute, which is typically enough for a kitchen board
-    return date.toLocaleTimeString('en-US', { 
-        hour: '2-digit', minute: '2-digit', hour12: true 
-    });
 };
-
-// --- Helper to render the itemized list for Kitchen view (FIXES REFERENCE ERROR) ---
-const renderKitchenOrderDetails = (order) => {
-    // Styles needed for this function (must be defined or imported elsewhere)
-    const kitchenDetailContainerStyle = { borderTop: '1px solid #eee', marginTop: '5px', paddingTop: '5px' };
-    const itemizedListStyle = { listStyle: 'none', padding: '0', margin: '0' };
-    const itemizedListItemStyle = { display: 'flex', justifyContent: 'space-between', padding: '3px 0', fontSize: '0.95em' };
-    const notesContainerStyle = { padding: '8px', backgroundColor: '#fff3cd', border: '1px solid #ffeeba', borderRadius: '4px', marginBottom: '5px' };
-
-
-    if (!order.items || order.items.length === 0) {
-        return <p style={{color: '#dc3545'}}>Item list is missing.</p>;
-    }
-    
-    return (
-        <div style={kitchenDetailContainerStyle}>
-            <ul style={itemizedListStyle}>
-                {order.items.map((item, index) => {
-                    const isCustom = item.type === 'special';
-                    const priceSet = item.price > 0;
-                    const style = isCustom ? {color: '#800080', fontWeight: 'bold'} : {};
-
-                    return (
-                        <li key={item.id || index} style={itemizedListItemStyle}>
-                            <span style={style}>{item.qty}x **{item.name}**</span>
-                            {isCustom && !priceSet && <span style={{color: '#ffc107', marginLeft: '10px'}}> (Price TBD)</span>}
-                        </li>
-                    );
-                })}
-            </ul>
-            {order.notes && (
-                <div style={notesContainerStyle}>
-                    <strong>Notes:</strong> 
-                    <p style={{ margin: '5px 0 0 0', fontStyle: 'italic', fontSize: '0.9em' }}>{order.notes}</p>
-                </div>
-            )}
-            <p style={{fontSize: '0.8em', marginTop: '10px'}}>
-                Order Time: {formatTime(order.orderTime)}
-            </p>
-        </div>
-    );
-};
-
 
 function KitchenDashboard() {
-    
-    const { orders, loading, error } = useRealTimeOrders(null, KITCHEN_MONITORING_STATUSES);
-    const [expandedOrderId, setExpandedOrderId] = useState(null); 
-    
-    const toggleOrderDetails = (orderId) => {
-        setExpandedOrderId(prevId => (prevId === orderId ? null : prevId)); 
-    };
+    // 1. NAVIGATION STATE
+    const [activeView, setActiveView] = useState('operations'); 
 
-    // ACTION: Move Status CONFIRMED (2) -> IN_PREP (3)
-    const handleStartPrep = async (orderId) => {
-        if (!window.confirm("Confirm STARTING preparation for this order?")) return;
+    // 2. DATA FETCHING (KDS)
+    const { orders, loading } = useRealTimeOrders(null, null, KITCHEN_MONITORING_STATUSES);
+    
+    // 3. MENU AVAILABILITY STATE
+    const [availability, setAvailability] = useState({});
+    const [processingId, setProcessingId] = useState(null); 
+
+    // --- NEW: STATE FOR BROADCAST MESSAGES ---
+    const [broadcasts, setBroadcasts] = useState([]);
+
+    useEffect(() => {
+        const docRef = doc(db, 'config', 'menuAvailability');
+        const unsubscribe = onSnapshot(docRef, (snapshot) => {
+            if (snapshot.exists()) {
+                setAvailability(snapshot.data());
+            } else {
+                setAvailability({});
+            }
+        });
+        return () => unsubscribe();
+    }, []);
+
+    // --- NEW: LISTEN FOR MESSAGES FROM FRONT DESK ---
+    useEffect(() => {
+        const q = query(collection(db, 'kitchen_notes'), orderBy('createdAt', 'desc'));
+        const unsubscribe = onSnapshot(q, (snapshot) => {
+            setBroadcasts(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+        });
+        return () => unsubscribe();
+    }, []);
+
+    // NEW FUNCTION: Mark message as read when clicked
+    const markAsRead = async (msgId) => {
         try {
-            await updateOrderStatus(orderId, 3, CURRENT_KITCHEN_ID, "Preparation started.");
-            alert(`Order ${orderId} is now IN PREP.`);
+            const msgRef = doc(db, 'kitchen_notes', msgId);
+            await updateDoc(msgRef, { status: 'read' });
         } catch (e) {
-            alert(`Failed to start prep: ${e.message}`);
+            console.error("Error marking read:", e);
         }
     };
 
-    // ACTION: Move Status IN_PREP (3) -> READY_FOR_PICKUP (4)
-    const handleMarkReady = async (orderId) => {
-        if (!window.confirm("Confirm order is READY for hand-off?")) return;
-        try {
-            await updateOrderStatus(orderId, 4, CURRENT_KITCHEN_ID, "Food is ready for delivery staff.");
-            alert(`Order ${orderId} is now READY.`);
-        } catch (e) {
-            alert(`Failed to mark ready: ${e.message}`);
-        }
-    };
+    const toggleAvailability = async (itemId) => {
+        if (processingId) return; 
+        setProcessingId(itemId);
 
-    // 🛑 KITCHEN ACTION: Dispatch (Status 4 -> 5) - FIXED CALL SIGNATURE
-    const handleDispatch = async (orderId) => {
-        const order = orders.find(o => o.id === orderId);
-        if (order.currentStatus !== 4) return;
+        const docRef = doc(db, 'config', 'menuAvailability');
         
-        const serverName = window.prompt("Enter Server Staff Name for dispatch:");
-        if (!serverName) return; 
-
         try {
-            // UPDATED: Added "Kitchen" as the sourceRole argument
-            await dispatchOrder(orderId, serverName, order.dispatchLocation || order.roomNumber, CURRENT_KITCHEN_ID, "Kitchen");
-            alert(`Order ${orderId} DISPATCHED by ${serverName}.`);
+            const docSnap = await getDoc(docRef);
+            const currentStatus = availability[itemId] !== false; 
+            const nextStatus = !currentStatus;
+
+            if (!docSnap.exists()) {
+                await setDoc(docRef, { [itemId]: nextStatus });
+            } else {
+                await updateDoc(docRef, { [itemId]: nextStatus });
+            }
         } catch (e) {
-            console.error("Dispatch Error:", e);
-            alert(`Failed to dispatch order: ${e.message}`);
+            console.error("Toggle Error:", e);
+            alert("Permission Denied: Update your Firestore Rules for 'config/menuAvailability'.");
+        } finally {
+            setProcessingId(null);
         }
     };
-    
-    if (loading) return <div>Loading Kitchen Orders...</div>;
-    if (error) return <div style={{color: 'red'}}>Error loading orders: {error.message}</div>;
 
-    // Separate orders for the Kanban columns
-    const confirmedOrders = orders.filter(o => o.currentStatus === 2);
-    const prepOrders = orders.filter(o => o.currentStatus === 3);
-    const readyToDispatchOrders = orders.filter(o => o.currentStatus === 4);
-    const dispatchedOrders = orders.filter(o => o.currentStatus === 5); // Monitor dispatched items
+    const groupedOrders = useMemo(() => {
+        return {
+            new: orders.filter(o => o.currentStatus === 2),
+            prep: orders.filter(o => o.currentStatus === 3),
+            ready: orders.filter(o => o.currentStatus === 4),
+            sent: orders.filter(o => o.currentStatus === 5),
+        };
+    }, [orders]);
 
-    const renderKitchenCard = (order) => {
+    const handleAction = useCallback(async (orderId, nextStatus) => {
+        const confirmMsg = nextStatus === 3 ? "Start preparing?" : "Mark as Ready?";
+        if (!window.confirm(confirmMsg)) return;
+        try {
+            await updateOrderStatus(orderId, nextStatus, CURRENT_KITCHEN_ID, `Kitchen move to ${nextStatus}`);
+        } catch (e) { 
+            alert("Error: " + e.message); 
+        }
+    }, []);
+
+    const handleDispatch = useCallback(async (orderId, order) => {
+        const server = window.prompt("ENTER SERVER NAME:");
+        if (!server) return; 
+        try {
+            await dispatchOrder(orderId, server, order.dispatchLocation || order.roomNumber || "N/A", CURRENT_KITCHEN_ID, "Kitchen");
+        } catch (e) { 
+            alert("Error: " + e.message); 
+        }
+    }, []);
+
+    const renderTicket = (order) => {
         const statusDetails = getStatusDetails(order.currentStatus);
-        const displayLocation = order.orderType === 'Dining Hall' ? order.dispatchLocation : order.roomNumber;
-        const hasUnpricedCustom = order.items.some(item => item.type === 'special' && item.price <= 0);
+        const loc = order.orderType === 'Dining Hall' ? (order.dispatchLocation || "Hall") : (order.roomNumber || "Guest");
+        const items = order.items || [];
+        const hasUnpriced = items.some(item => item.type === 'special' && (item.price === undefined || item.price <= 0));
+        
+        const placedTime = formatTime(order.orderTime);
+        const confirmedEntry = order.statusHistory?.find(e => e.status === 2);
+        const confirmTime = confirmedEntry ? formatTime(confirmedEntry.timestamp) : '--:--';
 
         return (
-            <div 
-                key={order.id} 
-                style={{ ...kitchenOrderCardStyle, borderColor: statusDetails.color }}
-                onClick={() => toggleOrderDetails(order.id)}
-            >
-                <div style={kitchenHeaderStyle}>
-                    <span style={{ fontWeight: 'bold' }}>#{order.id} ({displayLocation})</span>
-                    <span style={{ color: statusDetails.color }}>{statusDetails.name}</span>
+            <div key={order.id} className="kitchen-ticket" style={ticketStyle(statusDetails?.color || '#ccc')}>
+                <div style={ticketHeader}>
+                    <span style={locTitle}>{loc}</span>
+                    <span className="id-container" style={idText}>
+                        <span className="short-id">#{order.id.slice(-4)}</span>
+                        <span className="full-id">{order.id}</span>
+                    </span>
                 </div>
-                
-                {hasUnpricedCustom && order.currentStatus === 2 && (
-                    <p style={{...failureTextStyle, padding: '5px', margin: '5px 0'}}>
-                        🛑 Awaiting FD Price Check!
-                    </p>
+                <div style={infoRow}>
+                    <span>P: {placedTime} | C: {confirmTime}</span>
+                </div>
+                {hasUnpriced && order.currentStatus === 2 && (
+                    <div style={priceAlert}>⚠️ PRICE REQ</div>
                 )}
-
-                {renderKitchenOrderDetails(order)}
-                
-                {/* Kitchen Action Buttons */}
-                <div style={{ display: 'flex', gap: '5px', marginTop: '10px' }}>
-                    {/* Status 2 -> 3 (Start Prep) */}
-                    {order.currentStatus === 2 && (
-                        <button 
-                            onClick={(e) => { e.stopPropagation(); handleStartPrep(order.id); }}
-                            disabled={hasUnpricedCustom}
-                            style={{ ...kitchenActionButtonStyle, backgroundColor: '#007bff' }}
-                        >
-                            Start Prep (Status 3)
-                        </button>
-                    )}
-                    {/* Status 3 -> 4 (Mark Ready) */}
-                    {order.currentStatus === 3 && (
-                        <button 
-                            onClick={(e) => { e.stopPropagation(); handleMarkReady(order.id); }}
-                            style={{ ...kitchenActionButtonStyle, backgroundColor: '#ffc107' }}
-                        >
-                            Mark Ready (Status 4)
-                        </button>
-                    )}
-                    {/* Status 4 -> 5 (DISPATCH) */}
-                    {order.currentStatus === 4 && (
-                         <button 
-                            onClick={(e) => { e.stopPropagation(); handleDispatch(order.id); }}
-                            style={{ ...kitchenActionButtonStyle, backgroundColor: '#28a745' }}
-                        >
-                            ➡️ Dispatch Order (Status 5)
-                        </button>
-                    )}
-                    {/* Status 5 Indicator */}
-                    {order.currentStatus === 5 && (
-                        <span style={{...cancelBlockedStyle, flexGrow: 1, backgroundColor: '#800080', color: 'white'}}>
-                            Dispatched by: {order.serverName || 'Server N/A'}
-                        </span>
+                <div style={itemsWrapper}>
+                    {items.length === 0 ? <div style={{fontSize: '0.6rem', color: '#999'}}>No items</div> : 
+                    items.map((item, index) => (
+                        <div key={item.id || index} style={itemLine}>
+                            <span style={qtyBadge}>{item.qty || 1}</span>
+                            <span style={itemLabel(item.type === 'special')}>{item.name?.toUpperCase() || "UNKNOWN"}</span>
+                        </div>
+                    ))}
+                    {order.notes && (
+                        <div style={notesStyle}><strong>N:</strong> {order.notes}</div>
                     )}
                 </div>
-
+                <div style={actionRow}>
+                    {order.currentStatus === 2 && (
+                        <button onClick={(e) => { e.stopPropagation(); handleAction(order.id, 3); }} disabled={hasUnpriced} style={{...btnBase, backgroundColor: hasUnpriced ? '#cbd5e1' : '#3b82f6'}}>START</button>
+                    )}
+                    {order.currentStatus === 3 && (
+                        <button onClick={(e) => { e.stopPropagation(); handleAction(order.id, 4); }} style={{...btnBase, backgroundColor: '#f59e0b'}}>READY</button>
+                    )}
+                    {order.currentStatus === 4 && (
+                         <button onClick={(e) => { e.stopPropagation(); handleDispatch(order.id, order); }} style={{...btnBase, backgroundColor: '#10b981'}}>DISPATCH</button>
+                    )}
+                    {order.currentStatus === 5 && (
+                         <div style={statusTag}>Server: {order.serverName || "Pending"}</div>
+                    )}
+                </div>
             </div>
         );
     };
 
+    const renderOperations = () => (
+        <div style={kdsContent}>
+            {[
+                { title: 'NEW ORDERS', data: groupedOrders.new, color: '#3b82f6' },
+                { title: 'PREPARING', data: groupedOrders.prep, color: '#f59e0b' },
+                { title: 'READY', data: groupedOrders.ready, color: '#10b981' },
+                { title: 'DELIVERING', data: groupedOrders.sent, color: '#6366f1' }
+            ].map((col) => (
+                <div key={col.title} style={kdsCol}>
+                    <div style={colHead(col.color)}>{col.title}</div>
+                    <div style={colBody}>{col.data.map(renderTicket)}</div>
+                </div>
+            ))}
+        </div>
+    );
+
+    // --- FIXED VIEW: SENDER, DATE, AND TIME NOW DISPLAYED ---
+    const renderNotesUpdates = () => (
+        <div style={{ padding: '20px', overflowY: 'auto', flex: 1 }}>
+            <h2 style={{ color: '#1e293b' }}>Front Desk Broadcast Messages</h2>
+            {broadcasts.length === 0 ? <p>No broadcast messages received.</p> : 
+                broadcasts.map(msg => (
+                    <div 
+                        key={msg.id} 
+                        onClick={() => markAsRead(msg.id)} // INTEGRATED: Click to mark as read
+                        style={{
+                            ...noteLogStyle,
+                            cursor: 'pointer',
+                            backgroundColor: msg.status === 'read' ? '#fff' : '#fff9f0',
+                            borderLeft: msg.status === 'read' ? '5px solid #cbd5e1' : '5px solid #f59e0b'
+                        }}
+                    >
+                        <div style={{display:'flex', justifyContent:'space-between'}}>
+                           <strong style={{color: msg.status === 'read' ? '#64748b' : '#3b82f6'}}>FROM: {msg.sender || msg.name || 'Front Desk'}</strong>
+                           <span style={{fontSize:'0.7rem', fontWeight:'bold', color: msg.status === 'read' ? '#2ecc71' : '#f39c12'}}>
+                                {msg.status === 'read' ? 'READ' : 'UNREAD'}
+                           </span>
+                        </div>
+                        <p style={{ margin: '5px 0', fontSize: '1.1rem', whiteSpace: 'pre-wrap' }}>{msg.message}</p>
+                        <small style={{ color: '#64748b' }}>
+                            Sent: {msg.date || ''} {msg.time ? ` at ${msg.time}` : ''}
+                        </small>
+                    </div>
+                ))
+            }
+        </div>
+    );
+
+    const renderMenuManager = () => (
+        <div style={{ padding: '20px', overflowY: 'auto', flex: 1 }}>
+            <h2 style={{ color: '#1e293b' }}>Menu Availability Control</h2>
+            <div style={menuGridStyle}>
+                {FULL_MENU_LIST.map(item => {
+                    const isBusy = processingId === item.id;
+                    const isAvailable = availability[item.id] !== false;
+                    return (
+                        <div key={item.id} style={menuItemToggleStyle}>
+                            <div>
+                                <div style={{ fontWeight: 'bold' }}>{item.name}</div>
+                                <div style={{ fontSize: '0.7rem', color: '#94a3b8' }}>ID: {item.id}</div>
+                            </div>
+                            <button 
+                                disabled={!!processingId}
+                                onClick={() => toggleAvailability(item.id)}
+                                style={{ 
+                                    ...toggleButtonStyle, 
+                                    backgroundColor: isBusy ? '#94a3b8' : (isAvailable ? '#10b981' : '#ef4444'),
+                                    cursor: !!processingId ? 'not-allowed' : 'pointer'
+                                }}
+                            >
+                                {isBusy ? "SAVING..." : (isAvailable ? 'AVAILABLE' : 'SOLD OUT')}
+                            </button>
+                        </div>
+                    );
+                })}
+            </div>
+        </div>
+    );
+
+    if (loading) return <div style={centerMsg}>Syncing Kitchen System...</div>;
 
     return (
-        <div style={kitchenBoardContainerStyle}>
-            <h2>🔪 Kitchen Order Board</h2>
-            <p>Focus: Preparation and Dispatch.</p>
+        <div style={kdsContainer}>
+            <style>
+                {`
+                    .kitchen-ticket { transition: all 0.2s ease; transform-origin: center; position: relative; z-index: 1; border: 1px solid #e2e8f0; }
+                    .kitchen-ticket:hover { transform: scale(1.15); box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4) !important; z-index: 1000; border: 2px solid #1e293b !important; }
+                    .full-id { display: none; }
+                    .kitchen-ticket:hover .short-id { display: none; }
+                    .kitchen-ticket:hover .full-id { display: inline; font-size: 0.65rem; color: #dc2626; }
+                `}
+            </style>
+
+            <div style={kdsAppBar}>
+                <div style={{ display: 'flex', gap: '8px' }}>
+                    <button onClick={() => setActiveView('operations')} style={activeView === 'operations' ? activeNavBtn : navBtn}>🍳 Kitchen Ops</button>
+                    <button onClick={() => setActiveView('notes')} style={activeView === 'notes' ? activeNavBtn : navBtn}>📝 FD Notes</button>
+                    <button onClick={() => setActiveView('menu')} style={activeView === 'menu' ? activeNavBtn : navBtn}>🚫 Manage Menu</button>
+                </div>
+                <div style={badge}>Active: {orders.length}</div>
+            </div>
             
-            <div style={kanbanContainerStyle}>
-                
-                {/* 1. CONFIRMED Column (Status 2) */}
-                <div style={kanbanColumnStyle}>
-                    <h3 style={{...kanbanHeaderStyle, borderBottom: '3px solid #007bff'}}>New Confirmed ({confirmedOrders.length})</h3>
-                    {confirmedOrders.map(renderKitchenCard)}
-                    {confirmedOrders.length === 0 && <p style={emptyColumnStyle}>No confirmed orders.</p>}
-                </div>
-
-                {/* 2. IN PREP Column (Status 3) */}
-                <div style={kanbanColumnStyle}>
-                    <h3 style={{...kanbanHeaderStyle, borderBottom: '3px solid #ffc107'}}>In Preparation ({prepOrders.length})</h3>
-                    {prepOrders.map(renderKitchenCard)}
-                    {prepOrders.length === 0 && <p style={emptyColumnStyle}>No orders in prep.</p>}
-                </div>
-
-                {/* 3. READY/DISPATCH Column (Status 4) */}
-                <div style={kanbanColumnStyle}>
-                    <h3 style={{...kanbanHeaderStyle, borderBottom: '3px solid #28a745'}}>Ready to Dispatch ({readyToDispatchOrders.length})</h3>
-                    {readyToDispatchOrders.map(renderKitchenCard)}
-                    {readyToDispatchOrders.length === 0 && <p style={emptyColumnStyle}>Nothing ready.</p>}
-                </div>
-                 
-                {/* 4. DISPATCHED MONITORING Column (Status 5) */}
-                <div style={kanbanColumnStyle}>
-                    <h3 style={{...kanbanHeaderStyle, borderBottom: '3px solid #800080'}}>Dispatched Orders ({dispatchedOrders.length})</h3>
-                    {dispatchedOrders.map(renderKitchenCard)}
-                    {dispatchedOrders.length === 0 && <p style={emptyColumnStyle}>No active deliveries.</p>}
-                </div>
+            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+                {activeView === 'operations' && renderOperations()}
+                {activeView === 'notes' && renderNotesUpdates()}
+                {activeView === 'menu' && renderMenuManager()}
             </div>
         </div>
     );
 }
 
+// --- ALL ORIGINAL STYLES RESTORED ---
+const kdsContainer = { height: '100vh', display: 'flex', flexDirection: 'column', backgroundColor: '#f1f5f9', overflow: 'hidden' };
+const kdsAppBar = { padding: '6px 20px', backgroundColor: '#1e293b', color: '#fff', display: 'flex', justifyContent: 'space-between', alignItems: 'center' };
+const badge = { backgroundColor: '#334155', color: '#fff', padding: '2px 10px', borderRadius: '15px', fontSize: '0.75rem' };
+const kdsContent = { display: 'flex', flex: 1, overflow: 'hidden', padding: '6px', gap: '6px' };
+const kdsCol = { flex: 1, display: 'flex', flexDirection: 'column', backgroundColor: '#e2e8f0', borderRadius: '6px', minWidth: '0' };
+const colHead = (color) => ({ padding: '6px', textAlign: 'center', fontWeight: 'bold', fontSize: '0.8rem', color: '#fff', backgroundColor: color, borderRadius: '6px 6px 0 0' });
+const colBody = { flex: 1, overflowY: 'auto', padding: '6px' };
+const ticketStyle = (color) => ({ backgroundColor: '#fff', borderRadius: '4px', marginBottom: '6px', borderLeft: `4px solid ${color}` });
+const ticketHeader = { padding: '4px 8px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' };
+const locTitle = { fontSize: '1.1rem', fontWeight: '900', color: '#0f172a' };
+const idText = { fontSize: '0.6rem', color: '#94a3b8', fontFamily: 'monospace' };
+const infoRow = { padding: '0 8px 2px 8px', fontSize: '0.6rem', color: '#64748b', borderBottom: '1px solid #f1f5f9' };
+const itemsWrapper = { padding: '4px 8px' };
+const itemLine = { display: 'flex', alignItems: 'center', gap: '5px', marginBottom: '2px' };
+const qtyBadge = { backgroundColor: '#fee2e2', padding: '1px 4px', borderRadius: '2px', fontSize: '0.8rem', fontWeight: 'bold', color: '#dc2626' };
+const itemLabel = (isSpec) => ({ fontSize: '0.75rem', fontWeight: '600', color: isSpec ? '#7c3aed' : '#334155' });
+const notesStyle = { marginTop: '4px', padding: '3px 6px', backgroundColor: '#fefce8', border: '1px solid #fef08a', borderRadius: '3px', fontSize: '0.7rem' };
+const priceAlert = { backgroundColor: '#fef2f2', color: '#dc2626', padding: '3px', textAlign: 'center', fontWeight: 'bold', fontSize: '0.6rem' };
+const actionRow = { padding: '5px' };
+const btnBase = { width: '100%', padding: '8px', color: '#fff', border: 'none', borderRadius: '4px', fontSize: '0.75rem', fontWeight: 'bold', cursor: 'pointer' };
+const statusTag = { textAlign: 'center', fontSize: '0.7rem', fontWeight: 'bold', color: '#6366f1', padding: '4px' };
+const centerMsg = { height: '100vh', display: 'flex', justifyContent: 'center', alignItems: 'center', backgroundColor: '#f8fafc' };
+
+const navBtn = { padding: '8px 15px', backgroundColor: '#334155', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold', fontSize: '0.85rem' };
+const activeNavBtn = { ...navBtn, backgroundColor: '#3b82f6' };
+const noteLogStyle = { padding: '15px', backgroundColor: '#fff', borderLeft: '5px solid #3b82f6', marginBottom: '12px', borderRadius: '6px', boxShadow: '0 2px 5px rgba(0,0,0,0.05)' };
+const menuGridStyle = { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '15px', marginTop: '20px' };
+const menuItemToggleStyle = { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '15px', backgroundColor: '#fff', borderRadius: '8px', border: '1px solid #e2e8f0' };
+const toggleButtonStyle = { padding: '8px 12px', color: '#fff', border: 'none', borderRadius: '6px', fontWeight: 'bold', fontSize: '0.7rem', cursor: 'pointer', minWidth: '90px' };
+
 export default KitchenDashboard;
-
-// --- STYLES ---
-const kitchenBoardContainerStyle = { padding: '20px', fontFamily: 'sans-serif' };
-const kanbanContainerStyle = { display: 'flex', gap: '20px', overflowX: 'auto', paddingBottom: '15px' };
-const kanbanColumnStyle = { flex: '1 1 300px', minWidth: '300px', backgroundColor: '#f0f0f0', padding: '10px', borderRadius: '8px', boxShadow: '0 2px 4px rgba(0,0,0,0.1)' };
-const kanbanHeaderStyle = { paddingBottom: '5px', marginBottom: '10px' };
-const kitchenOrderCardStyle = { padding: '10px', backgroundColor: 'white', border: '2px solid', borderRadius: '6px', marginBottom: '10px', boxShadow: '0 1px 3px rgba(0,0,0,0.05)', cursor: 'pointer' };
-const kitchenHeaderStyle = { display: 'flex', justifyContent: 'space-between', fontWeight: 'bold', marginBottom: '5px' };
-const kitchenDetailContainerStyle = { borderTop: '1px solid #eee', marginTop: '5px', paddingTop: '5px' };
-const kitchenActionButtonStyle = { padding: '8px', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold', flexGrow: 1 };
-const emptyColumnStyle = { textAlign: 'center', color: '#6c757d', padding: '20px', border: '1px dashed #ced4da', borderRadius: '5px' };
-
-const failureTextStyle = {
-    color: '#dc3545', 
-    fontWeight: 'bold', 
-    backgroundColor: '#ffe6e6',
-    border: '1px solid #dc3545',
-    borderRadius: '4px'
-}
-
-const cancelBlockedStyle = {
-    padding: '8px 15px',
-    backgroundColor: '#f8d7da',
-    color: '#721c24',
-    border: '1px solid #f5c6cb',
-    borderRadius: '4px',
-    fontSize: '0.9em',
-    alignSelf: 'center'
-};

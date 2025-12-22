@@ -1,696 +1,360 @@
-// src/components/FrontDeskDashboard.jsx
-
-import React, { useState } from 'react'; 
+import React, { useState, useEffect, useMemo } from 'react'; 
 import { useRealTimeOrders } from '../hooks/useRealTimeOrders'; 
-// Only importing what is absolutely necessary for PENDING and HISTORY management
-import { confirmOrder, updateOrderStatus, deleteOrderPermanently, cancelOrder, updateCustomItemPrices } from '../utils/orderActions'; 
+import { confirmOrder, updateOrderStatus, cancelOrder, updateCustomItemPrices } from '../utils/orderActions'; 
 import { getStatusDetails } from '../utils/statusMapping'; 
+import { collection, addDoc, onSnapshot, query, orderBy, serverTimestamp, doc, updateDoc, deleteDoc } from 'firebase/firestore';
+import { db } from '../config/firebase';
 
-// --- STATUS CONSTANTS FOR FRONT DESK VIEW ---
-const ACTIVE_MONITORING_STATUSES = [1, 2, 4, 5, 6]; 
-const HISTORY_STATUSES = [0, 7, 8];
+import FrontDeskArchival from './FrontDeskArchival';
 
-// Mock user ID (replace with actual auth context in a full app)
+const ACTIVE_MONITORING_STATUSES = [1, 2, 3, 4, 5, 6]; 
 const CURRENT_FRONT_DESK_ID = "FD_User_A"; 
 const CURRENCY_SYMBOL = 'GH₵'; 
 
-// --- Helper function for clear, consistent date formatting ---
-const formatTime = (timestampOrDate) => {
+const STATUS_BACKUP = {
+    1: { label: 'PENDING', color: '#3498db' },
+    2: { label: 'CONFIRMED', color: '#2ecc71' },
+    3: { label: 'PREPARING', color: '#f1c40f' },
+    4: { label: 'READY', color: '#9b59b6' },
+    5: { label: 'DELIVERING', color: '#1abc9c' },
+    6: { label: 'DELIVERING', color: '#27ae60' } 
+};
+
+const formatTimeLong = (timestampOrDate) => {
     if (!timestampOrDate) return 'N/A';
-    let date;
-    if (timestampOrDate.toDate) {
-        date = timestampOrDate.toDate(); 
-    } else {
-        date = timestampOrDate; 
-    }
+    let date = timestampOrDate.toDate ? timestampOrDate.toDate() : new Date(timestampOrDate); 
     return date.toLocaleString('en-US', { 
         year: 'numeric', month: '2-digit', day: '2-digit', 
         hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true 
     });
 };
 
-// --- Helper to render the full itemized list and financial summary ---
-const renderFinancialsCard = (order, isPriceEditable, customItemPrices, setCustomItemPrices) => {
-    const financials = order.financials || {};
-    
-    if (!order.items || order.items.length === 0) {
-        return <p style={failureTextStyle}>⚠️ Item list is missing or empty in the order payload.</p>;
-    }
-    
-    if (financials.grandTotal === undefined || financials.grandTotal === null) {
-        return <p style={failureTextStyle}>⚠️ Financial totals (Grand Total) are missing in the order payload.</p>;
-    }
-
-
-    const handlePriceInputChange = (itemId, value) => {
-        setCustomItemPrices(prev => ({ ...prev, [itemId]: value }));
-    };
-    
-    return (
-        <div style={financialCardStyle}>
-            <h4 style={{ fontWeight: 'bold', marginBottom: '10px' }}>Itemized Breakdown:</h4>
-            
-            <ul style={itemizedListStyle}>
-                {order.items.map((item, index) => {
-                    const key = item.id || index;
-                    const isCustom = item.type === 'special';
-                    const tempPriceString = customItemPrices[item.id];
-                    const savedPrice = item.price || 0; 
-                    
-                    const calculatedPrice = (tempPriceString !== undefined && tempPriceString !== "")
-                                            ? parseFloat(tempPriceString) || 0
-                                            : savedPrice;
-                    
-                    const inputValue = tempPriceString !== undefined 
-                                       ? tempPriceString 
-                                       : savedPrice.toFixed(2);
-                    
-                    return (
-                        <li key={key} style={itemizedListItemStyle}>
-                            <div style={{ display: 'flex', flexDirection: 'column', flexGrow: 1 }}>
-                                <span>{item.qty}x **{item.name}** {isCustom && <strong style={{ color: '#800080' }}>(CUSTOM)</strong>}</span>
-                                {isCustom && (savedPrice === 0) && (
-                                    <span style={{ fontSize: '0.8em', color: '#dc3545' }}>
-                                        Price TBD
-                                    </span>
-                                )}
-                            </div>
-                            
-                            <div style={{ display: 'flex', alignItems: 'center' }}>
-                                
-                                {isPriceEditable && isCustom ? (
-                                    <div style={{ display: 'flex', alignItems: 'center' }}>
-                                        <span style={{ marginRight: '3px' }}>{CURRENCY_SYMBOL}</span>
-                                        <input
-                                            type="number"
-                                            min="0"
-                                            step="0.01"
-                                            value={inputValue} 
-                                            onChange={(e) => handlePriceInputChange(item.id, e.target.value)}
-                                            style={customPriceInputStyle}
-                                            placeholder="0.00"
-                                        />
-                                        <span style={{ marginLeft: '5px' }}>x {item.qty}</span>
-                                        <span style={{ fontWeight: 'bold', marginLeft: '10px', width: '60px', textAlign: 'right' }}>
-                                            = {CURRENCY_SYMBOL}{(calculatedPrice * item.qty).toFixed(2)}
-                                        </span>
-                                    </div>
-                                ) : (
-                                    <span>{CURRENCY_SYMBOL}{(savedPrice * item.qty).toFixed(2)}</span>
-                                )}
-                            </div>
-                        </li>
-                    );
-                })}
-            </ul>
-
-            <div style={breakdownContainerStyle}>
-                <div style={breakdownRowStyle}>
-                    <span>Subtotal (Items):</span>
-                    <span>{CURRENCY_SYMBOL}{financials.subtotal.toFixed(2)}</span>
-                </div>
-                {financials.serviceCharge > 0 && (
-                    <div style={breakdownRowStyle}>
-                        <span>Service Charge (GH₵ 30.00):</span>
-                        <span>{CURRENCY_SYMBOL}{financials.serviceCharge.toFixed(2)}</span>
-                    </div>
-                )}
-                <div style={grandTotalRowStyle}>
-                    <strong>GRAND TOTAL DUE:</strong>
-                    <strong>{CURRENCY_SYMBOL}{financials.grandTotal.toFixed(2)}</strong>
-                </div>
-                {order.financials?.hasSpecialItems && order.currentStatus === 1 && (
-                    <p style={{ color: '#ffc107', fontSize: '0.8em', fontWeight: 'bold', marginTop: '5px' }}>
-                        *Pricing required for custom item(s).*
-                    </p>
-                )}
-            </div>
-        </div>
-    );
-};
-
-
 function FrontDeskDashboard() {
+    const [activeHubView, setActiveHubView] = useState('operations');
+    const { orders: activeData, loading: activeLoading } = useRealTimeOrders(null, null, null);
     
-    // 1. Fetch ACTIVE Orders - Use the defined status array
-    const { orders: activeOrdersData, loading: activeLoading } = useRealTimeOrders(null, ACTIVE_MONITORING_STATUSES);
-    
-    // 2. Fetch HISTORY Orders - Use the defined history status array
-    const { orders: historyOrdersData, loading: historyLoading } = useRealTimeOrders(null, HISTORY_STATUSES);
-    
-    const [expandedHistoryId, setExpandedHistoryId] = useState(null); 
-    const [customItemPrices, setCustomItemPrices] = useState({}); 
+    const [searchTerm, setSearchTerm] = useState('');
+    const [activeFilterStatus, setActiveFilterStatus] = useState(0); 
 
-    
-    const toggleHistoryDetails = (orderId) => {
-        setExpandedHistoryId(prevId => (prevId === orderId ? null : orderId)); 
-    };
+    const [sentMessages, setSentMessages] = useState([]);
+    const [editingId, setEditingId] = useState(null);
+    const [msgForm, setMsgForm] = useState({ 
+        name: '', 
+        date: new Date().toISOString().split('T')[0], 
+        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }), 
+        message: '' 
+    });
 
-    const allActiveOrders = activeOrdersData;
-    const allHistoryOrders = historyOrdersData;
+    const [tempPrices, setTempPrices] = useState({});
+    const [editingPriceIndex, setEditingPriceIndex] = useState(null); 
+    const [expandedOrderId, setExpandedOrderId] = useState(null);
 
-    const pendingOrders = allActiveOrders.filter(order => order.currentStatus === 1); 
-    
-    const completedHistory = allHistoryOrders.filter(order => order.currentStatus === 0 || order.currentStatus === 7 || order.currentStatus === 8);
-
-
-    const handleConfirm = async (orderId) => {
-        const order = allActiveOrders.find(o => o.id === orderId); 
-        
-        if (!order) {
-             alert("Order not found in active list. Please refresh.");
-             return;
-        }
-
-        if (window.confirm(`Are you sure you want to verify and accept order ${orderId}?`)) {
-            try {
-                // Status 1 -> 2 (CONFIRMED)
-                await confirmOrder(orderId, CURRENT_FRONT_DESK_ID);
-                alert(`Order ${orderId} is now CONFIRMED and sent to the kitchen.`);
-                
-                setExpandedHistoryId(null); 
-                
-            } catch (e) {
-                console.error("Confirmation Error:", e);
-                alert(`Failed to confirm order: ${e.message}`);
-            }
-        }
-    };
-    
-    // 🛑 HANDLERS REMOVED: handleMarkDispatched, handleConfirmDelivery, handleMarkCompleted 
-    // These are now handled by KitchenDashboard or FrontDeskArchival
-
-    // --- handlePriceUpdate (UNCHANGED) ---
-    const handlePriceUpdate = async (order) => {
-        const customItems = order.items?.filter(item => item.type === 'special') || [];
-        
-        const itemsWithNoPrice = customItems.filter(item => {
-            const rawPrice = customItemPrices[item.id];
-            const price = (rawPrice !== undefined && rawPrice !== "") ? parseFloat(rawPrice) : item.price;
-            return price <= 0 || isNaN(price);
+    useEffect(() => {
+        const q = query(collection(db, 'kitchen_notes'), orderBy('createdAt', 'desc'));
+        const unsubscribe = onSnapshot(q, (snapshot) => {
+            setSentMessages(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
         });
+        return () => unsubscribe();
+    }, []);
 
-        if (itemsWithNoPrice.length > 0) {
-            alert("🛑 All custom items must be priced above GH₵ 0.00 and be valid numbers before saving.");
-            return;
-        }
+    const liveOrdersOnly = useMemo(() => {
+        return activeData.filter(o => ACTIVE_MONITORING_STATUSES.includes(o.currentStatus));
+    }, [activeData]);
 
-        if (!window.confirm("Confirm saving new prices for custom items?")) {
-            return;
-        }
+    const activeOrdersCount = liveOrdersOnly.length;
 
-        const finalItems = order.items.map(item => {
-            if (item.type === 'special') {
-                const rawPrice = customItemPrices[item.id];
-                const newPrice = (rawPrice !== undefined && rawPrice !== "") ? parseFloat(rawPrice) : item.price;
-                
-                return {
-                    ...item,
-                    price: newPrice
-                };
-            }
-            return item;
-        });
-
-        try {
-            await updateCustomItemPrices(order.id, finalItems, order.orderType, CURRENT_FRONT_DESK_ID);
-            alert(`Prices updated successfully!`);
+    const masterFilteredOrders = useMemo(() => {
+        return liveOrdersOnly.filter(o => {
+            const s = searchTerm.toLowerCase();
+            const location = (o.orderType === 'Dining Hall' ? o.dispatchLocation : o.roomNumber) || "";
+            const matchesSearch = o.roomNumber?.toLowerCase().includes(s) || 
+                                 location.toLowerCase().includes(s) || 
+                                 (o.id || "").toLowerCase().includes(s);
             
-            setCustomItemPrices(prev => {
-                const newState = { ...prev };
-                order.items?.forEach(item => delete newState[item.id]);
-                return newState;
-            });
+            if (!matchesSearch) return false;
+            if (activeFilterStatus === 0) return true;
+            if (activeFilterStatus === 5) return (o.currentStatus === 5 || o.currentStatus === 6);
+            return o.currentStatus === activeFilterStatus;
+        });
+    }, [liveOrdersOnly, searchTerm, activeFilterStatus]);
 
-        } catch (e) {
-            alert(`Failed to update prices: ${e.message}`);
+    const handleCancelWithGuard = async (orderId) => {
+        if (window.confirm("Are you sure you want to cancel this order? This action cannot be undone.")) {
+            try { await cancelOrder(orderId, CURRENT_FRONT_DESK_ID); } catch (e) { alert("Error: " + e.message); }
         }
     };
 
-    // --- History Handlers (UNCHANGED) ---
-    const handleFrontDeskCancel = async (orderId) => {
-        const orderStatus = allActiveOrders.find(o => o.id === orderId)?.currentStatus;
-        
-        if (orderStatus >= 3) { 
-            alert("🛑 Cannot cancel: Order is already being prepared or dispatched.");
-            return;
-        }
+    const handleSavePrice = async (orderId, itemIndex) => {
+        const priceValue = tempPrices[`${orderId}-${itemIndex}`];
+        const newPrice = parseFloat(priceValue);
+        if (isNaN(newPrice) || newPrice < 0) return alert("Please enter a valid price");
+        const order = activeData.find(o => o.id === orderId);
+        if (!order) return;
+        const updatedItems = [...order.items];
+        updatedItems[itemIndex] = { ...updatedItems[itemIndex], price: newPrice };
+        try {
+            await updateCustomItemPrices(orderId, updatedItems, order.orderType, CURRENT_FRONT_DESK_ID);
+            setEditingPriceIndex(null);
+        } catch (e) { alert("Error: " + e.message); }
+    };
 
-        const reason = window.prompt(`Enter reason for cancelling Order ${orderId}:`);
-        
-        if (reason) {
-            if (window.confirm(`Confirm cancellation of Order ${orderId}? This cannot be undone.`)) {
-                try {
-                    await cancelOrder(orderId, `FrontDesk:${CURRENT_FRONT_DESK_ID}`, `Cancelled by FD due to: ${reason}`);
-                    alert(`Order ${orderId} has been successfully CANCELLED.`);
-                    setExpandedHistoryId(null); 
-                } catch (e) {
-                    alert(`Failed to cancel order: ${e.message}`);
-                }
+    const handleSendBroadcast = async () => {
+        if(!msgForm.name || !msgForm.message) return alert("Name and Message are required");
+        const payload = {
+            sender: msgForm.name,
+            message: msgForm.message,
+            date: msgForm.date,
+            time: msgForm.time,
+            updatedAt: serverTimestamp(),
+            status: 'unread'
+        };
+        try {
+            if (editingId) {
+                await updateDoc(doc(db, 'kitchen_notes', editingId), payload);
+                setEditingId(null);
+            } else {
+                await addDoc(collection(db, 'kitchen_notes'), { ...payload, createdAt: serverTimestamp() });
             }
-        }
+            setMsgForm({
+                name: msgForm.name, message: '',
+                date: new Date().toISOString().split('T')[0],
+                time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })
+            });
+        } catch (e) { alert("Error: " + e.message); }
     };
-    
-    const handleClearHistory = async () => {
-        const ordersToClear = completedHistory.filter(order => order.currentStatus === 7);
-        if (ordersToClear.length === 0) {
-            alert("No orders currently marked as COMPLETED (Status 7) to archive/clear.");
-            return;
-        }
-        if (!window.confirm(`Are you sure you want to ARCHIVE ${ordersToClear.length} completed orders? (They will still be visible to Account/Manager)`)) {
-            return;
-        }
-
-        const clearPromises = ordersToClear.map(order => 
-            // Status 7 -> 8 (ARCHIVED)
-            updateOrderStatus(order.id, 8, `Front Desk: ${CURRENT_FRONT_DESK_ID}`, "Order cleared from history list.")
-        );
-        try {
-            await Promise.all(clearPromises);
-            alert(`${ordersToClear.length} orders successfully ARCHIVED (Status 8).`);
-            setExpandedHistoryId(null); 
-        } catch (e) {
-            alert(`Failed to archive history: ${e.message}`);
-        }
-    };
-    
-    const handlePermanentDelete = async (orderId) => {
-        if (!window.confirm(`⚠️ WARNING: Are you ABSOLUTELY sure you want to permanently DELETE Order ${orderId}? This cannot be recovered.`)) {
-            return;
-        }
-        try {
-            await deleteOrderPermanently(orderId);
-            alert(`Order ${orderId} has been permanently removed.`);
-            setExpandedHistoryId(null); 
-        } catch (e) {
-            alert(`Failed to delete order: ${e.message}`);
-        }
-    };
-    
-    const handlePermanentDeleteAllArchived = async () => {
-        const archivedOrders = completedHistory.filter(order => order.currentStatus === 8);
-        
-        if (archivedOrders.length === 0) {
-            alert("No orders are currently archived (Status 8) to delete.");
-            return;
-        }
-
-        if (!window.confirm(`⚠️ WARNING: Are you ABSOLUTELY sure you want to permanently DELETE ALL ${archivedOrders.length} archived orders? This cannot be recovered.`)) {
-            return;
-        }
-
-        const deletePromises = archivedOrders.map(order => 
-            deleteOrderPermanently(order.id)
-        );
-
-        try {
-            await Promise.all(deletePromises);
-            alert(`✅ ${archivedOrders.length} archived orders have been permanently cleared.`);
-            setExpandedHistoryId(null); 
-        } catch (e) {
-            alert(`Failed to delete archived orders: ${e.message}`);
-        }
-    };
-
 
     const renderOrderCard = (order) => {
-        const confirmedEntry = order.statusHistory?.find(entry => entry.status === 2);
-        const confirmationTime = confirmedEntry ? formatTime(confirmedEntry.timestamp) : 'Awaiting Confirmation...';
-        const statusDetails = getStatusDetails(order.currentStatus);
-
-        const isPriceEditable = order.currentStatus === 1; // Only editable when PENDING
-        const hasCustomItems = order.items?.some(item => item.type === 'special');
-
-        const canCancel = order.currentStatus <= 2;
-        // Block confirm if custom items exist AND their price is still 0 
-        const canConfirm = order.currentStatus === 1 && !order.financials?.hasSpecialItems; 
-
-        // FIX: Use dispatchLocation (Guest Name for walk-in) or roomNumber for display
+        const details = getStatusDetails(order.currentStatus);
+        const label = details?.label || STATUS_BACKUP[order.currentStatus]?.label || "ACTIVE";
+        const color = details?.color || STATUS_BACKUP[order.currentStatus]?.color || "#ccc";
         const displayLocation = order.orderType === 'Dining Hall' ? order.dispatchLocation : order.roomNumber;
-
-        // Action Buttons: Dispatch/Complete
-        // THESE STATUSES ARE ONLY FOR DISPLAY, ACTIONS ARE REMOVED
-        const isReadyForDispatch = order.currentStatus === 4; 
-        const isDispatched = order.currentStatus === 5;
-        const isDelivered = order.currentStatus === 6;
-
+        
+        const confirmedEntry = order.statusHistory?.find(entry => entry.status === 2);
+        const confirmationTime = confirmedEntry ? formatTimeLong(confirmedEntry.timestamp) : 'Not Confirmed';
 
         return (
-            <div key={order.id} style={{ ...orderCardStyle, backgroundColor: statusDetails.color + '30' }}>
+            <div key={order.id} style={{ ...orderCardStyle, borderTop: `6px solid ${color}` }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                    {/* RESTORED: Exact full original ID in Operations */}
+                    <h4 style={{fontSize: '0.75rem', marginBottom: '8px', fontFamily: 'monospace', wordBreak: 'break-all'}}>ID: {order.id}</h4>
+                    {order.prepTime && <span style={prepTimeBadgeStyle}>⏱️ {order.prepTime}</span>}
+                </div>
                 
-                <h4>
-                    Order ID: {order.id} | Service: <strong>{order.orderType}</strong> | 
-                    Status: <strong style={{color: statusDetails.color}}>{statusDetails.name}</strong> 
-                </h4>
-                <p>Location: <strong>{displayLocation || order.roomNumber}</strong></p> 
-                <p style={{fontSize: '0.9em'}}>WhatsApp: <strong>{order.whatsappNumber || 'N/A'}</strong></p>
+                <p style={infoLine}>Status: <strong style={{color}}>{label.toUpperCase()}</strong></p>
+                <p style={infoLine}>Loc: <strong>{displayLocation}</strong> | WA: <strong>{order.whatsappNumber || 'N/A'}</strong></p>
+                {order.serverName && <p style={infoLine}>Server: <strong>{order.serverName}</strong></p>}
                 
-                <hr style={{ margin: '8px 0'}} />
+                <div style={notesContainerStyle}><strong>Special Request:</strong><p style={{margin: '3px 0 0 0'}}>{order.notes || 'NA'}</p></div>
                 
-                {order.notes && (
-                    <div style={notesContainerStyle}>
-                        <strong>Special Request/Allergies:</strong> 
-                        <p style={{ margin: '5px 0 0 0', fontStyle: 'italic' }}>{order.notes}</p>
-                    </div>
-                )}
+                <div style={financialCardStyle}>
+                    <ul style={itemizedListStyle}>
+                        {order.items?.map((item, idx) => {
+                            const isEditing = editingPriceIndex === `${order.id}-${idx}`;
+                            return (
+                                <li key={idx} style={{...itemizedListItemStyle, flexDirection: 'column', alignItems: 'flex-start', borderBottom: '1px solid #eee', paddingBottom: '5px'}}>
+                                    <div style={{display:'flex', justifyContent:'space-between', width: '100%', alignItems: 'center'}}>
+                                        <span>{item.qty}x {item.name}</span>
+                                        <div style={{display: 'flex', alignItems: 'center', gap: '8px'}}>
+                                            <span>{CURRENCY_SYMBOL}{((item.price || 0) * item.qty).toFixed(2)}</span>
+                                            {order.currentStatus === 1 && item.type === 'special' && !isEditing && (
+                                                <button onClick={() => {setEditingPriceIndex(`${order.id}-${idx}`); setTempPrices({...tempPrices, [`${order.id}-${idx}`]: item.price});}} style={{fontSize: '0.6rem', padding: '2px 4px', cursor: 'pointer', backgroundColor: '#f1c40f', border: 'none', borderRadius: '3px'}}>Edit Price</button>
+                                            )}
+                                        </div>
+                                    </div>
+                                    {isEditing && (
+                                        <div style={{display: 'flex', gap: '5px', marginTop: '5px', width: '100%'}}>
+                                            <input type="number" style={{flex: 1, fontSize: '0.7rem'}} value={tempPrices[`${order.id}-${idx}`] ?? ''} onChange={(e) => setTempPrices({...tempPrices, [`${order.id}-${idx}`]: e.target.value})} />
+                                            <button onClick={() => handleSavePrice(order.id, idx)} style={{fontSize: '0.65rem', backgroundColor: '#3498db', color: '#fff', border: 'none', padding: '2px 8px'}}>Save</button>
+                                            <button onClick={() => setEditingPriceIndex(null)} style={{fontSize: '0.65rem', backgroundColor: '#999', color: '#fff', border: 'none', padding: '2px 8px'}}>X</button>
+                                        </div>
+                                    )}
+                                </li>
+                            );
+                        })}
+                    </ul>
+                    <div style={grandTotalRowStyle}><strong>TOTAL:</strong><strong>{CURRENCY_SYMBOL}{order.financials?.grandTotal?.toFixed(2)}</strong></div>
+                </div>
                 
-                {/* 🎨 Render Financials Card (passing edit permissions and state) */}
-                {renderFinancialsCard(order, isPriceEditable, customItemPrices, setCustomItemPrices)}
+                <p style={{marginTop:'10px', fontSize: '0.75rem'}}>Placed: <strong>{formatTimeLong(order.orderTime)}</strong></p>
+                <p style={{marginTop:'2px', fontSize: '0.75rem'}}>Confirmed: <strong>{confirmationTime}</strong></p>
 
-                <hr style={{ margin: '8px 0'}} />
-
-                <p>Order Placed: <strong>{formatTime(order.orderTime)}</strong></p>
-                <p style={{ marginBottom: '10px' }}>Confirmed At: <strong>{confirmationTime}</strong></p>
-
-                {order.serverName && (<p style={{ fontSize: '0.9em' }}>Server: {order.serverName}</p>)}
-                
-                {/* Action Buttons for Front Desk */}
-                <div style={{ display: 'flex', gap: '10px', marginTop: '10px', flexWrap: 'wrap' }}>
-                    
-                    {/* Price Update Button (Shows when custom items are pending pricing) */}
-                    {isPriceEditable && hasCustomItems && (
-                        <button 
-                            onClick={() => handlePriceUpdate(order)} 
-                            style={priceUpdateButton}
-                        >
-                            💰 Save Custom Prices
-                        </button>
+                <div style={{ display: 'flex', gap: '5px', marginTop: '10px' }}>
+                    {order.currentStatus === 1 && (
+                        <button onClick={() => confirmOrder(order.id, CURRENT_FRONT_DESK_ID)} style={{...confirmButtonStyle, opacity: order.items.some(i => i.price <= 0) ? 0.5 : 1}} disabled={order.items.some(i => i.price <= 0)}>Accept</button>
                     )}
-
-                    {/* Confirm Button (Status 1) */}
-                    {order.currentStatus === 1 && canConfirm && (
-                        <button 
-                            onClick={() => handleConfirm(order.id)} 
-                            style={confirmButtonStyle}
-                        >
-                            Verify and Accept (Status 2)
-                        </button>
-                    )}
-                    
-                    {/* Display message if Prep has started, Dispatch, or Delivery is confirmed */}
-                    {order.currentStatus >= 3 && order.currentStatus <= 6 && (
-                        <span style={cancelBlockedStyle}>
-                           Order Status: {statusDetails.name} - See Front Desk Final Actions for next step.
-                        </span>
-                    )}
-
-                    {/* Warn message if confirmation is blocked by pricing */}
-                    {order.currentStatus === 1 && !canConfirm && hasCustomItems && (
-                        <span style={cancelBlockedStyle}>Set Price to Confirm!</span>
-                    )}
-
-                    {/* Front Desk Cancel Button (Status 1 or 2) */}
-                    {canCancel && (
-                        <button 
-                            onClick={() => handleFrontDeskCancel(order.id)} 
-                            style={cancelFrontDeskButtonStyle}
-                        >
-                            ❌ Cancel Order
-                        </button>
-                    )}
+                    {order.currentStatus === 6 && <button onClick={() => updateOrderStatus(order.id, 7, CURRENT_FRONT_DESK_ID)} style={confirmButtonStyle}>Complete</button>}
+                    {order.currentStatus <= 2 && <button onClick={() => handleCancelWithGuard(order.id)} style={cancelFrontDeskButtonStyle}>Cancel</button>}
                 </div>
             </div>
         );
     };
 
-    if (activeLoading || historyLoading) {
-        return <div>Loading Front Desk Orders...</div>;
-    }
-
-    // 🛑 FIX: This is the ONLY declaration for frontDeskMonitoredNoPrep.
-    // Filter Active Monitoring to exclude Status 3 (IN_PREP) and only show Confirmed (2)
-    const frontDeskMonitoredNoPrep = allActiveOrders.filter(order => order.currentStatus === 2);
-
-
-    // --- FRONT DESK RENDERING ---
     return (
-        <div style={{ padding: '20px', border: '1px solid #ccc' }}>
-            
-            {/* 1. PENDING Orders Section */}
-            <h2>🛎️ New PENDING Orders ({pendingOrders.length})</h2>
-            <p>Action: Price custom items (if any), verify, accept, or cancel.</p>
-            {pendingOrders.length === 0 ? (<p>No new orders pending confirmation.</p>) : (
-                pendingOrders.map(order => (
-                    <div key={order.id}> 
-                        {renderOrderCard(order)}
-                    </div>
-                ))
-            )}
-            
-            <hr/>
-
-            {/* 2. Active Monitoring Section (Confirmed Only) */}
-            <h2>👀 Confirmed Orders Awaiting Kitchen ({frontDeskMonitoredNoPrep.length})</h2>
-            <p>Monitors confirmed orders (Status 2) before they enter preparation (Status 3).</p>
-            {frontDeskMonitoredNoPrep.length === 0 ? (<p>No confirmed orders currently being monitored.</p>) : (frontDeskMonitoredNoPrep.map(renderOrderCard))}
-            
-            <hr/>
-            
-            {/* 3. Completed Staff History Section (Status 0, 7, 8) */}
-            <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap'}}>
-                <h2>📦 History Log ({completedHistory.length})</h2>
-                <div>
-                    {/* Button to archive Status 7 orders */}
-                    {completedHistory.filter(order => order.currentStatus === 7).length > 0 && (
-                        <button onClick={handleClearHistory} style={clearHistoryButtonStyle}>
-                            Archive Completed ({completedHistory.filter(order => order.currentStatus === 7).length})
-                        </button>
-                    )}
-                    
-                    {/* Button to delete ALL Status 8 orders */}
-                    {completedHistory.filter(order => order.currentStatus === 8).length > 0 && (
-                        <button onClick={handlePermanentDeleteAllArchived} style={{...deleteButtonStyle, marginLeft: '10px'}}>
-                            Clear All Archived ({completedHistory.filter(order => order.currentStatus === 8).length})
-                        </button>
-                    )}
-                </div>
+        <div style={{ padding: '15px', backgroundColor: '#f4f7f6', minHeight: '100vh' }}>
+            <div style={hubNav}>
+                <button onClick={() => setActiveHubView('operations')} style={activeHubView === 'operations' ? activeHubBtn : hubBtn}>📋 OPERATIONS</button>
+                <button onClick={() => setActiveHubView('final')} style={activeHubView === 'final' ? activeHubBtn : hubBtn}>🛎️ FINAL ACTIONS</button>
+                <button onClick={() => setActiveHubView('history')} style={activeHubView === 'history' ? activeHubBtn : hubBtn}>📜 HISTORY</button>
+                <button onClick={() => setActiveHubView('messenger')} style={activeHubView === 'messenger' ? activeHubBtn : hubBtn}>💬 KITCHEN MSG</button>
             </div>
-            
-            <p>Records of completed (Status 7), cleared (Status 8), and cancelled (Status 0) orders.</p>
 
-            {completedHistory.length === 0 ? (
-                <p style={{color: '#6c757d'}}>No orders in history log.</p>
-            ) : (
-                completedHistory.map(order => {
-                    const isExpanded = expandedHistoryId === order.id;
-                    const isCleared = order.currentStatus === 8;
-                    const isCancelled = order.currentStatus === 0;
-                    const headerColor = isCleared ? '#778899' : (isCancelled ? '#E74C3C' : '#008000');
-                    const displayLocation = order.orderType === 'Dining Hall' ? order.dispatchLocation : order.roomNumber;
-
-
-                    return (
-                        <div 
-                            key={order.id} 
-                            style={{ ...historyCardStyle, cursor: 'pointer', opacity: isCleared ? 0.6 : 1 }}
-                            onClick={() => toggleHistoryDetails(order.id)} 
-                        >
-                            <div style={historyHeaderStyle}>
-                                <span style={{ fontWeight: 'bold' }}>Order #{order.id} ({displayLocation})</span>
-                                <span style={{ fontWeight: 'bold', color: headerColor }}>
-                                    {isCancelled ? 'CANCELLED' : (isCleared ? 'ARCHIVED' : `TOTAL: ${CURRENCY_SYMBOL}${order.financials?.grandTotal.toFixed(2)}`)}
-                                </span>
-                                <span>{isExpanded ? '▲ Hide Details' : '▼ Show Details'}</span>
+            {activeHubView === 'operations' && (
+                <>
+                    <div style={filterBarContainer}>
+                        <div style={statusBtnGroup}>
+                            {[{id:0,l:'ALL'},{id:1,l:'PENDING'},{id:2,l:'CONFIRMED'},{id:3,l:'PREPARING'},{id:4,l:'READY'},{id:5,l:'DELIVERING'}].map(tab => (
+                                <button key={tab.id} onClick={() => setActiveFilterStatus(tab.id)} style={activeFilterStatus === tab.id ? activeFilterBtn : filterBtn}>{tab.l}</button>
+                            ))}
+                        </div>
+                        <div style={{display:'flex', alignItems:'center', gap: '15px'}}>
+                            <div style={activeCounterBadge}>🔥 {activeOrdersCount} Active</div>
+                            <input type="text" placeholder="Search by ID or Room..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} style={searchBar} />
+                        </div>
+                    </div>
+                    <div style={wideGridContainer}>
+                        {[1, 2, 3, 4, 5].map(st => (
+                            <div key={st} style={columnStyle}>
+                                <h3 style={colHeadStyle}>{STATUS_BACKUP[st]?.label || 'DELIVERING'}</h3>
+                                {masterFilteredOrders.filter(o => st === 5 ? [5,6].includes(o.currentStatus) : o.currentStatus === st).map(renderOrderCard)}
                             </div>
+                        ))}
+                    </div>
+                </>
+            )}
 
-                            {/* Detailed Breakdown (Only rendered when expanded) */}
-                            {isExpanded && (
-                                <div style={historyDetailStyle} onClick={(e) => e.stopPropagation()}> 
-                                    <hr/>
-                                    {order.notes && (
-                                        <div style={notesContainerStyle}>
-                                            <strong>Special Request/Allergies:</strong> 
-                                            <p style={{ margin: '5px 0 0 0', fontStyle: 'italic' }}>{order.notes}</p>
+            {activeHubView === 'final' && (
+                <FrontDeskArchival isActive={activeHubView === 'final'} orders={liveOrdersOnly} />
+            )}
+
+            {activeHubView === 'history' && (
+                <div style={{maxWidth: '850px', margin: '0 auto', background: '#fff', padding: '25px', borderRadius: '12px', boxShadow: '0 4px 15px rgba(0,0,0,0.05)'}}>
+                    <h2 style={{borderBottom: '2px solid #f0f0f0', paddingBottom: '15px', marginBottom: '20px'}}>Past Orders</h2>
+                    <div style={{display: 'flex', flexDirection: 'column', gap: '12px'}}>
+                        {activeData.filter(o => o.currentStatus === 0 || o.currentStatus >= 7).sort((a,b) => (b.archivalDate || b.orderTime) - (a.archivalDate || a.orderTime)).map(o => {
+                            const isExpanded = expandedOrderId === o.id;
+                            const displayLoc = o.orderType === 'Dining Hall' ? o.dispatchLocation : o.roomNumber;
+                            return (
+                                <div key={o.id} style={historyCardStyle} onClick={() => setExpandedOrderId(isExpanded ? null : o.id)}>
+                                    <div style={historyHeaderStyle}>
+                                        <div style={historyHeaderRowStyle}>
+                                            <div style={{display: 'flex', flexDirection: 'column', gap: '2px'}}>
+                                                {/* RESTORED: Exact full original ID in History */}
+                                                <span style={{ fontWeight: 'bold', fontSize: '0.85rem', fontFamily: 'monospace', color: '#1e293b' }}>
+                                                    FULL ID: {o.id}
+                                                </span>
+                                                <span style={{ fontSize: '0.9rem', color: '#2c3e50', fontWeight: '600' }}>Location: {displayLoc}</span>
+                                            </div>
+                                            <span style={historyTotalStyle}>{CURRENCY_SYMBOL}{(o.financials?.grandTotal || 0).toFixed(2)}</span>
+                                        </div>
+                                        <div style={historyHeaderRowStyle}>
+                                            <span style={{ fontSize: '0.8em', color: '#6c757d' }}>Finalized: {formatTimeLong(o.archivalDate || o.orderTime)}</span>
+                                            <span style={{ color: '#343a40' }}>{o.orderType}</span>
+                                        </div>
+                                        <span style={historyToggleStyle}>{isExpanded ? '▲ Hide Details' : '▼ View Details'}</span>
+                                    </div>
+                                    {isExpanded && (
+                                        <div style={historyDetailStyle}>
+                                            <hr style={{ margin: '10px 0', border: '0', borderTop: '1px solid #eee' }}/>
+                                            <div style={breakdownCardStyle}>
+                                                <h4 style={{ borderBottom: '1px solid #ced4da', paddingBottom: '5px', fontSize: '0.85rem' }}>Price Breakdown</h4>
+                                                <ul style={itemizedListStyle}>
+                                                    {o.items?.map((item, idx) => (
+                                                        <li key={idx} style={itemizedListItemStyle}>
+                                                            <span>{item.qty}x {item.name}</span>
+                                                            <span>{CURRENCY_SYMBOL}{((item.price || 0) * item.qty).toFixed(2)}</span>
+                                                        </li>
+                                                    ))}
+                                                </ul>
+                                                <div style={breakdownSummaryStyle}>
+                                                    <div style={breakdownRowStyle}><span>Subtotal:</span><span>{CURRENCY_SYMBOL}{o.financials?.subtotal?.toFixed(2)}</span></div>
+                                                    {o.financials?.serviceCharge > 0 && <div style={breakdownRowStyle}><span>Service Charge:</span><span>{CURRENCY_SYMBOL}{o.financials?.serviceCharge?.toFixed(2)}</span></div>}
+                                                    <div style={grandTotalRowStyle}><strong>GRAND TOTAL:</strong><strong>{CURRENCY_SYMBOL}{o.financials?.grandTotal?.toFixed(2)}</strong></div>
+                                                </div>
+                                            </div>
+                                            <p style={{ marginTop: '10px', fontSize: '0.85rem' }}>Ordered: {formatTimeLong(o.orderTime)} | Server: {o.serverName || 'N/A'}</p>
                                         </div>
                                     )}
-                                    {/* History view uses the non-editable financial card */}
-                                    {renderFinancialsCard(order, false, {}, () => {})} 
-                                    <p style={{fontSize: '0.8em', marginTop: '10px'}}>
-                                        Status Time: {formatTime(order.archivalDate || order.orderTime)} | Server: {order.serverName || 'N/A'}
-                                    </p>
-                                    <p style={{fontSize: '0.8em'}}>
-                                        Order Placed: {formatTime(order.orderTime)}
-                                    </p>
-                                    
-                                    {/* Permanent Deletion Button for Canceled and Cleared */}
-                                    {(isCleared || isCancelled) && (
-                                        <button 
-                                            onClick={(e) => {
-                                                e.stopPropagation(); 
-                                                handlePermanentDelete(order.id);
-                                            }}
-                                            style={deleteButtonStyle}
-                                        >
-                                            🗑️ Delete Permanently ({isCancelled ? 'Status 0' : 'Status 8'})
-                                        </button>
-                                    )}
                                 </div>
-                            )}
+                            );
+                        })}
+                    </div>
+                </div>
+            )}
+
+            {activeHubView === 'messenger' && (
+                <div style={messengerWrapper}>
+                    <div style={orderCardStyle}>
+                        <h3>{editingId ? "✏️ Edit Broadcast" : "📢 Broadcast to Kitchen"}</h3>
+                        <input type="text" placeholder="Name" value={msgForm.name} onChange={e => setMsgForm({...msgForm, name: e.target.value})} style={inputStyle} />
+                        <div style={{ display: 'flex', gap: '10px', marginBottom: '10px' }}>
+                            <input type="date" value={msgForm.date} onChange={e => setMsgForm({...msgForm, date: e.target.value})} style={{...inputStyle, marginBottom: 0, flex: 1}} />
+                            <input type="time" value={msgForm.time} onChange={e => setMsgForm({...msgForm, time: e.target.value})} style={{...inputStyle, marginBottom: 0, flex: 1}} />
                         </div>
-                    );
-                })
+                        <textarea placeholder="Message..." value={msgForm.message} onChange={e => setMsgForm({...msgForm, message: e.target.value})} style={textAreaStyle} />
+                        <div style={{display:'flex', gap:'10px', marginTop:'10px'}}>
+                            <button onClick={handleSendBroadcast} style={confirmButtonStyle}>{editingId ? "Update" : "🚀 Send"}</button>
+                            {editingId && <button onClick={() => {setEditingId(null); setMsgForm({...msgForm, message:''})}} style={cancelFrontDeskButtonStyle}>Cancel</button>}
+                        </div>
+                    </div>
+                    <div style={{marginTop: '20px'}}>
+                        <h4>Broadcast History</h4>
+                        {sentMessages.map(m => (
+                            <div key={m.id} style={{...orderCardStyle, borderLeft: m.status === 'read' ? '5px solid #2ecc71' : '5px solid #f1c40f'}}>
+                                <div style={{display:'flex', justifyContent:'space-between', marginBottom: '5px'}}>
+                                    <strong>{m.sender}</strong>
+                                    <span style={{fontSize: '0.7rem', fontWeight: 'bold', color: m.status === 'read' ? '#2ecc71' : '#f39c12'}}>{m.status === 'read' ? '✅ READ' : '⏳ UNREAD'}</span>
+                                    <small>{m.date} {m.time}</small>
+                                </div>
+                                <p style={{whiteSpace: 'pre-wrap', margin: '10px 0'}}>{m.message}</p>
+                                <div style={{display:'flex', gap: '10px'}}>
+                                    <button onClick={() => {setEditingId(m.id); setMsgForm({ name: m.sender, message: m.message, date: m.date, time: m.time })}} style={editActionBtn}>✏️ Edit</button>
+                                    <button onClick={async () => {if(window.confirm("Delete broadcast?")) await deleteDoc(doc(db, 'kitchen_notes', m.id))}} style={delActionBtn}>🗑️ Del</button>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                </div>
             )}
         </div>
     );
 }
 
-// --- STYLES (UNCHANGED) ---
-const priceUpdateButton = {
-    padding: '8px 15px',
-    backgroundColor: '#ffc107', 
-    color: '#343a40',
-    border: 'none',
-    borderRadius: '4px',
-    cursor: 'pointer',
-    fontWeight: 'bold',
-    flexGrow: 1
-};
-const customPriceInputStyle = {
-    width: '60px',
-    padding: '4px',
-    marginLeft: '5px',
-    textAlign: 'right',
-    border: '1px solid #ced4da',
-    borderRadius: '3px'
-};
-
-const failureTextStyle = {
-    color: '#dc3545', 
-    fontWeight: 'bold', 
-    marginTop: '10px', 
-    marginBottom: '10px',
-    padding: '10px',
-    backgroundColor: '#ffe6e6',
-    border: '1px solid #dc3545',
-    borderRadius: '4px'
-}
-
-const orderCardStyle = {
-    margin: '10px 0',
-    padding: '15px',
-    border: '1px solid #ddd',
-    borderRadius: '5px',
-};
-
-const confirmButtonStyle = {
-    padding: '8px 15px',
-    backgroundColor: '#4CAF50',
-    color: 'white',
-    border: 'none',
-    borderRadius: '4px',
-    cursor: 'pointer'
-};
-
-const cancelFrontDeskButtonStyle = {
-    padding: '8px 15px',
-    backgroundColor: '#dc3545',
-    color: 'white',
-    border: 'none',
-    borderRadius: '4px',
-    cursor: 'pointer',
-    flexGrow: 1
-};
-
-const cancelBlockedStyle = {
-    padding: '8px 15px',
-    backgroundColor: '#f8d7da',
-    color: '#721c24',
-    border: '1px solid #f5c6cb',
-    borderRadius: '4px',
-    fontSize: '0.9em',
-    alignSelf: 'center'
-};
-
-const financialCardStyle = {
-    marginBottom: '10px',
-    padding: '5px',
-    backgroundColor: '#fff',
-    borderRadius: '4px'
-};
-
-const itemizedListStyle = {
-    listStyle: 'none',
-    padding: '0',
-    margin: '0 0 10px 0',
-    borderBottom: '1px dotted #ced4da',
-    paddingBottom: '5px'
-};
-
-const itemizedListItemStyle = {
-    display: 'flex',
-    justifyContent: 'space-between',
-    padding: '3px 0',
-    fontSize: '0.95em'
-};
-
-const breakdownContainerStyle = {
-    marginTop: '5px',
-    paddingTop: '5px',
-    fontSize: '0.95rem'
-};
-
-const breakdownRowStyle = {
-    display: 'flex',
-    justifyContent: 'space-between',
-    padding: '3px 0',
-    color: '#343a40'
-};
-
-const grandTotalRowStyle = {
-    ...breakdownRowStyle,
-    borderTop: '2px double #343a40',
-    paddingTop: '8px',
-    fontSize: '1.1rem',
-    fontWeight: 'bold'
-};
-
-const historyCardStyle = {
-    margin: '10px 0',
-    padding: '10px',
-    border: '1px solid #ddd',
-    borderRadius: '5px',
-    backgroundColor: '#f9f9f9',
-};
-
-const historyHeaderStyle = {
-    display: 'flex',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    padding: '5px 0'
-};
-
-const historyDetailStyle = {
-    paddingTop: '10px'
-};
-
-const clearHistoryButtonStyle = {
-    padding: '8px 15px',
-    backgroundColor: '#DC3545',
-    color: 'white',
-    border: 'none',
-    borderRadius: '4px',
-    cursor: 'pointer',
-    fontWeight: 'bold'
-};
-
-const deleteButtonStyle = {
-    padding: '8px 15px',
-    backgroundColor: '#8B0000', 
-    color: 'white',
-    border: 'none',
-    borderRadius: '4px',
-    cursor: 'pointer',
-    fontWeight: 'bold',
-    marginTop: '10px',
-};
-
-const notesContainerStyle = {
-    padding: '10px',
-    backgroundColor: '#fff3cd', 
-    border: '1px solid #ffeeba',
-    borderRadius: '4px',
-    marginBottom: '10px'
-};
-
+// STYLES
+const prepTimeBadgeStyle = { backgroundColor: '#fff7ed', color: '#c2410c', border: '1px solid #ffedd5', padding: '2px 6px', borderRadius: '4px', fontSize: '0.7rem', fontWeight: 'bold' };
+const historyCardStyle = { margin: '10px 0', padding: '15px', border: '1px solid #ddd', borderRadius: '8px', backgroundColor: '#fff', fontSize: '0.9em', cursor: 'pointer' };
+const historyHeaderStyle = { display: 'flex', flexDirection: 'column', gap: '4px' };
+const historyHeaderRowStyle = { display: 'flex', justifyContent: 'space-between', width: '100%' };
+const historyTotalStyle = { fontWeight: 'bold', color: '#008000', backgroundColor: '#e6ffe6', padding: '2px 8px', borderRadius: '4px' };
+const historyToggleStyle = { marginTop: '5px', fontSize: '0.8em', color: '#007bff' };
+const historyDetailStyle = { paddingTop: '5px' };
+const breakdownCardStyle = { padding: '10px', border: '1px solid #eee', borderRadius: '4px', marginBottom: '10px', backgroundColor: '#fafafa' };
+const breakdownSummaryStyle = { marginTop: '10px', paddingTop: '5px', fontSize: '0.95rem' };
+const breakdownRowStyle = { display: 'flex', justifyContent: 'space-between', padding: '3px 0', color: '#343a40' };
+const grandTotalRowStyle = { ...breakdownRowStyle, borderTop: '2px double #343a40', paddingTop: '8px', fontSize: '1rem', fontWeight: 'bold' };
+const activeCounterBadge = { backgroundColor: '#e74c3c', color: 'white', padding: '6px 12px', borderRadius: '20px', fontSize: '0.75rem', fontWeight: 'bold' };
+const wideGridContainer = { display: 'flex', gap: '12px', alignItems: 'flex-start', overflowX: 'auto' };
+const columnStyle = { flex: '1', minWidth: '310px', backgroundColor: '#ebedef', padding: '12px', borderRadius: '10px' };
+const colHeadStyle = { borderBottom: '2px solid #ccc', paddingBottom: '10px', fontSize: '0.9rem', textAlign: 'center', fontWeight: 'bold' };
+const filterBarContainer = { display: 'flex', justifyContent: 'space-between', marginBottom: '15px', padding: '10px', backgroundColor: '#fff', borderRadius: '8px', alignItems: 'center' };
+const statusBtnGroup = { display: 'flex', gap: '5px' };
+const filterBtn = { padding: '8px 12px', border: '1px solid #ddd', borderRadius: '4px', cursor: 'pointer', fontSize: '0.7rem', fontWeight: 'bold' };
+const activeFilterBtn = { ...filterBtn, backgroundColor: '#1e293b', color: '#fff' };
+const searchBar = { padding: '10px', borderRadius: '6px', border: '1px solid #ddd', width: '250px', fontSize: '0.85rem' };
+const hubNav = { display: 'flex', gap: '10px', marginBottom: '15px', justifyContent: 'center' };
+const hubBtn = { padding: '10px 20px', backgroundColor: '#6c757d', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold', fontSize: '0.8rem' };
+const activeHubBtn = { ...hubBtn, backgroundColor: '#ffc107', color: '#1e293b' };
+const orderCardStyle = { margin: '12px 0', padding: '15px', border: '1px solid #ddd', borderRadius: '8px', backgroundColor: '#fff' };
+const infoLine = { fontSize: '0.85rem', marginBottom: '5px' };
+const notesContainerStyle = { padding: '10px', backgroundColor: '#fff3cd', border: '1px solid #ffeeba', borderRadius: '4px', marginBottom: '10px', fontSize: '0.85rem' };
+const financialCardStyle = { marginTop: '10px', padding: '12px', backgroundColor: '#fafafa', borderRadius: '6px', border: '1px solid #eee' };
+const itemizedListStyle = { listStyle: 'none', padding: '0', margin: '0' };
+const itemizedListItemStyle = { display: 'flex', justifyContent: 'space-between', padding: '4px 0', fontSize: '0.85rem' };
+const confirmButtonStyle = { flex: 1, padding: '10px', backgroundColor: '#2ecc71', color: 'white', border: 'none', borderRadius: '4px', fontWeight: 'bold', cursor: 'pointer', fontSize: '0.8rem' };
+const cancelFrontDeskButtonStyle = { padding: '10px', backgroundColor: '#e74c3c', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '0.8rem' };
+const inputStyle = { width: '100%', padding: '10px', borderRadius: '4px', border: '1px solid #ccc', marginBottom: '10px', boxSizing: 'border-box' };
+const textAreaStyle = { width: '100%', height: '80px', padding: '10px', borderRadius: '4px', border: '1px solid #ccc', boxSizing: 'border-box', whiteSpace: 'pre-wrap' };
+const messengerWrapper = { maxWidth: '800px', margin: '0 auto' };
+const editActionBtn = { background: '#3498db', color: 'white', border: 'none', padding: '5px 12px', borderRadius: '4px', cursor: 'pointer', fontSize: '0.75rem' };
+const delActionBtn = { background: '#e74c3c', color: 'white', border: 'none', padding: '5px 12px', borderRadius: '4px', cursor: 'pointer', fontSize: '0.75rem' };
 
 export default FrontDeskDashboard;

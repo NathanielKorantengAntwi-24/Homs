@@ -183,6 +183,9 @@ function GuestOrderForm({ guestId, onOrderSuccess }) {
 
     // --- NEW HANDLERS FOR MODAL INTERACTION ---
     const handleSelectItemForEdit = (item) => {
+        // --- ADDED: BLOCK SELECTION IF KITCHEN MARKED AS SOLD OUT ---
+        if (availabilityMap[item.id] === false) return;
+
         const currentQty = itemQuantities[item.id] || 0;
         
         // Pass item data and current quantity to the modal
@@ -410,17 +413,7 @@ function GuestOrderForm({ guestId, onOrderSuccess }) {
                     <div style={horizontalScrollWrapperStyle}> 
                         {CATEGORIES.map(category => {
                             const filteredCategoryItems = fullMenu[category]
-                                // 1. Filter by search term
-                                .filter(item => item.name.toLowerCase().includes(menuSearchTerm.toLowerCase()))
-                                // 2. FILTER by availability status from Firestore
-                                .filter(item => availabilityMap[item.id] !== false);
-                            
-                            if (filteredCategoryItems.length === 0 && menuSearchTerm.length > 0) return null;
-                            
-                            if (filteredCategoryItems.length === 0 && menuSearchTerm.length === 0) {
-                                // Hide the entire category if all items are unavailable and not searching
-                                return null;
-                            }
+                                .filter(item => item.name.toLowerCase().includes(menuSearchTerm.toLowerCase()));
                             
                             return (
                                 <div key={category} style={horizontalCategoryColumnStyle}>
@@ -429,14 +422,19 @@ function GuestOrderForm({ guestId, onOrderSuccess }) {
                                     <div style={verticalScrollListStyle}> 
                                         <div style={categoryItemsListStyle}>
                                             {filteredCategoryItems.map(item => {
-                                                // Get the current quantity to display on the card
                                                 const currentQty = itemQuantities[item.id] || 0;
+                                                const isAvailable = availabilityMap[item.id] !== false;
                                                 
                                                 return (
-                                                    // Menu Item Card (NOW CLICKABLE)
+                                                    // Menu Item Card
                                                     <div 
                                                         key={item.id} 
-                                                        style={{...itemCardStyle, cursor: 'pointer', borderColor: currentQty > 0 ? CATEGORY_COLORS[category] : '#e9ecef'}} 
+                                                        style={{
+                                                            ...itemCardStyle, 
+                                                            cursor: isAvailable ? 'pointer' : 'not-allowed', 
+                                                            borderColor: currentQty > 0 ? CATEGORY_COLORS[category] : '#e9ecef',
+                                                            opacity: isAvailable ? 1 : 0.6
+                                                        }} 
                                                         onClick={() => handleSelectItemForEdit(item)}
                                                     >
                                                         <img 
@@ -448,15 +446,14 @@ function GuestOrderForm({ guestId, onOrderSuccess }) {
                                                             <div style={itemTextGroupStyle}>
                                                                 <strong style={itemNameStyle}>{item.name}</strong> 
                                                                 <em style={itemPriceStyle}>{CURRENCY_SYMBOL}{item.price.toFixed(2)}</em>
+                                                                {!isAvailable && <span style={{color: '#dc3545', fontSize: '0.7rem', fontWeight: 'bold', display: 'block'}}>SOLD OUT</span>}
                                                             </div>
                                                             {/* Show Quantity Badge */}
-                                                            {currentQty > 0 && (
+                                                            {currentQty > 0 && isAvailable && (
                                                                 <span style={{ backgroundColor: CATEGORY_COLORS[category], color: 'white', padding: '4px 8px', borderRadius: '15px', fontSize: '0.8rem', fontWeight: 'bold' }}>
                                                                     Qty: {currentQty}
                                                                 </span>
                                                             )}
-                                                            
-                                                            {/* REMOVED: Direct quantity input is gone */}
                                                         </div>
                                                     </div>
                                                 );
@@ -512,7 +509,6 @@ function GuestOrderForm({ guestId, onOrderSuccess }) {
                                             type="text" placeholder="Search room..." value={roomSearchTerm}
                                             onChange={(e) => {
                                                 const term = e.target.value; setRoomSearchTerm(term);
-                                                const newFiltered = mockRooms.filter(room => room.toLowerCase().includes(term.toLowerCase()));
                                                 setSelectedRoom(''); 
                                                 if (validationErrors.location) setValidationErrors(prev => ({...prev, location: null}));
                                             }}
@@ -540,7 +536,7 @@ function GuestOrderForm({ guestId, onOrderSuccess }) {
                         )}
                     </div>
 
-                    {/* Custom Items Section (Always available in the details phase) */}
+                    {/* Custom Items Section */}
                     <div style={sectionStyleGuestForm}>
                         <h3 style={summaryHeaderStyle}>Order Details</h3>
                         
@@ -598,9 +594,6 @@ function GuestOrderForm({ guestId, onOrderSuccess }) {
                 </>
             )}
 
-            {/* ======================================================= */}
-            {/* MODAL: ITEM QUANTITY EDITOR (Rendered outside of main flow) */}
-            {/* ======================================================= */}
             {isModalOpen && itemToEdit && (
                 <CartItemEditor
                     item={itemToEdit}
@@ -613,147 +606,31 @@ function GuestOrderForm({ guestId, onOrderSuccess }) {
     );
 }
 
-// --- STYLES (Kept exactly as you provided) ---
-const landingButtonStyle = {
-    padding: '20px', fontSize: '1.2rem', fontWeight: 'bold', color: 'white', backgroundColor: '#007bff', border: 'none', borderRadius: '10px', cursor: 'pointer', textAlign: 'center', boxShadow: '0 4px 6px rgba(0,0,0,0.1)', transition: 'transform 0.1s'
-};
-const continueButtonStyle = {
-    padding: '15px 30px', 
-    backgroundColor: '#ff8c00', 
-    color: 'white', 
-    border: 'none', 
-    borderRadius: '8px', 
-    fontSize: '1.2rem', 
-    fontWeight: 'bold', 
-    cursor: 'pointer',
-    transition: 'background-color 0.2s',
-    width: '100%', 
-    boxSizing: 'border-box'
-};
-const backButtonStyle = {
-    padding: '8px 12px', backgroundColor: '#6c757d', color: 'white', border: 'none', borderRadius: '5px', cursor: 'pointer'
-};
-const clearButtonStyle = {
-    padding: '8px 12px', backgroundColor: '#dc3545', color: 'white', border: 'none', borderRadius: '5px', cursor: 'pointer'
-};
-
-const containerStyle = { 
-    maxWidth: '1400px', 
-    width: '95%', 
-    margin: '20px auto', 
-    padding: '20px', 
-    fontFamily: 'sans-serif', 
-    backgroundColor: '#f8f9fa', 
-    borderRadius: '12px', 
-    boxShadow: '0 8px 20px rgba(0,0,0,0.15)', 
-    boxSizing: 'border-box' 
-};
+// --- ALL ORIGINAL STYLES PRESERVED ---
+const landingButtonStyle = { padding: '20px', fontSize: '1.2rem', fontWeight: 'bold', color: 'white', backgroundColor: '#007bff', border: 'none', borderRadius: '10px', cursor: 'pointer', textAlign: 'center', boxShadow: '0 4px 6px rgba(0,0,0,0.1)', transition: 'transform 0.1s' };
+const continueButtonStyle = { padding: '15px 30px', backgroundColor: '#ff8c00', color: 'white', border: 'none', borderRadius: '8px', fontSize: '1.2rem', fontWeight: 'bold', cursor: 'pointer', transition: 'background-color 0.2s', width: '100%', boxSizing: 'border-box' };
+const backButtonStyle = { padding: '8px 12px', backgroundColor: '#6c757d', color: 'white', border: 'none', borderRadius: '5px', cursor: 'pointer' };
+const clearButtonStyle = { padding: '8px 12px', backgroundColor: '#dc3545', color: 'white', border: 'none', borderRadius: '5px', cursor: 'pointer' };
+const containerStyle = { maxWidth: '1400px', width: '95%', margin: '20px auto', padding: '20px', fontFamily: 'sans-serif', backgroundColor: '#f8f9fa', borderRadius: '12px', boxShadow: '0 8px 20px rgba(0,0,0,0.15)', boxSizing: 'border-box' };
 const headerStyleGuestForm = { textAlign: 'center', color: '#007bff', borderBottom: '2px solid #e9ecef', paddingBottom: '10px', marginBottom: '20px' };
-
 const sectionStyleGuestForm = { marginBottom: '8px', padding: '15px', border: '1px solid #dee2e6', borderRadius: '8px', backgroundColor: '#ffffff' }; 
 const labelStyle = { fontWeight: '600', display: 'block', marginBottom: '3px', color: '#343a40' }; 
 const selectStyle = { padding: '10px', width: '100%', marginBottom: '10px', borderRadius: '5px', border: '1px solid #ced4da' };
 const inputGroupStyle = { padding: '10px', border: '1px dashed #ced4da', borderRadius: '5px' };
 const inputStyle = { padding: '10px', borderRadius: '5px', border: '1px solid #ced4da', boxSizing: 'border-box', width: '100%' };
-
-
-// Horizontal scrolling for categories
-const horizontalScrollWrapperStyle = {
-    display: 'flex',
-    overflowX: 'auto', 
-    padding: '0 0 10px 0', 
-    gap: '15px', 
-    WebkitOverflowScrolling: 'touch' 
-};
-
-// Fixed width and flex properties for category columns
-const horizontalCategoryColumnStyle = {
-    flex: '0 0 auto', 
-    width: 'min(80vw, 350px)', 
-    padding: '0 10px 10px 10px',
-    backgroundColor: '#fff',
-    borderRadius: '8px',
-    boxShadow: '0 2px 8px rgba(0,0,0,0.05)',
-    borderTop: '1px solid #e9ecef',
-    boxSizing: 'border-box'
-};
-
-// Container for vertical scrolling within the horizontal column
-const verticalScrollListStyle = {
-    maxHeight: '70vh', 
-    overflowY: 'auto', 
-    paddingRight: '10px', 
-    marginTop: '5px',
-};
-
-
-// Tighter Item Packing
-const categoryItemsListStyle = {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: '4px' 
-}
-const categoryHeaderStyle = { 
-    textAlign: 'left', 
-    marginBottom: '5px', 
-    fontSize: '1.3rem', 
-    paddingBottom: '5px' 
-};
-
-// Menu Item Card Design
-const itemCardStyle = { 
-    display: 'flex', 
-    alignItems: 'center', 
-    padding: '4px', 
-    backgroundColor: '#ffffff', 
-    borderRadius: '8px', 
-    boxShadow: '0 2px 4px rgba(0,0,0,0.05)', 
-    border: '1px solid #e9ecef',
-    transition: 'transform 0.1s',
-};
-const imageStyle = {
-    width: '55px', 
-    height: '55px',
-    borderRadius: '6px', 
-    objectFit: 'cover',
-    marginRight: '10px', 
-    flexShrink: 0,
-    border: '1px solid #f8f9fa'
-};
-const itemDetailsContainerStyle = {
-    display: 'flex',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    flexGrow: 1,
-};
-const itemTextGroupStyle = {
-    flexGrow: 1,
-    paddingRight: '10px'
-};
-const itemNameStyle = { 
-    fontSize: '0.95rem', 
-    color: '#343a40' 
-};
-const itemPriceStyle = { 
-    fontSize: '0.85rem', 
-    fontWeight: '600', 
-    color: '#007bff', 
-    display: 'block' 
-};
-
+const horizontalScrollWrapperStyle = { display: 'flex', overflowX: 'auto', padding: '0 0 10px 0', gap: '15px', WebkitOverflowScrolling: 'touch' };
+const horizontalCategoryColumnStyle = { flex: '0 0 auto', width: 'min(80vw, 350px)', padding: '0 10px 10px 10px', backgroundColor: '#fff', borderRadius: '8px', boxShadow: '0 2px 8px rgba(0,0,0,0.05)', borderTop: '1px solid #e9ecef', boxSizing: 'border-box' };
+const verticalScrollListStyle = { maxHeight: '70vh', overflowY: 'auto', paddingRight: '10px', marginTop: '5px' };
+const categoryItemsListStyle = { display: 'flex', flexDirection: 'column', gap: '4px' }
+const categoryHeaderStyle = { textAlign: 'left', marginBottom: '5px', fontSize: '1.3rem', paddingBottom: '5px' };
+const itemCardStyle = { display: 'flex', alignItems: 'center', padding: '4px', backgroundColor: '#ffffff', borderRadius: '8px', boxShadow: '0 2px 4px rgba(0,0,0,0.05)', border: '1px solid #e9ecef', transition: 'transform 0.1s' };
+const imageStyle = { width: '55px', height: '55px', borderRadius: '6px', objectFit: 'cover', marginRight: '10px', flexShrink: 0, border: '1px solid #f8f9fa' };
+const itemDetailsContainerStyle = { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexGrow: 1 };
+const itemTextGroupStyle = { flexGrow: 1, paddingRight: '10px' };
+const itemNameStyle = { fontSize: '0.95rem', color: '#343a40' };
+const itemPriceStyle = { fontSize: '0.85rem', fontWeight: '600', color: '#007bff', display: 'block' };
 const summaryHeaderStyle = { borderBottom: '1px solid #ccc', paddingBottom: '5px' };
-const placeOrderButtonStyle = { 
-    padding: '15px', 
-    width: '100%', 
-    backgroundColor: '#28a745', 
-    color: 'white', 
-    border: 'none', 
-    borderRadius: '25px', 
-    fontSize: '1.2rem', 
-    fontWeight: 'bold', 
-    marginTop: '10px', 
-    cursor: 'pointer' 
-};
+const placeOrderButtonStyle = { padding: '15px', width: '100%', backgroundColor: '#28a745', color: 'white', border: 'none', borderRadius: '25px', fontSize: '1.2rem', fontWeight: 'bold', marginTop: '10px', cursor: 'pointer' };
 const infoTextStyle = { fontSize: '0.9rem', color: '#666' };
 const yellTextStyle = { color: '#dc3545', fontWeight: 'bold', margin: '5px 0', backgroundColor: '#ffe3e3', padding: '5px', borderRadius: '4px' };
 const specialOrderContainerStyle = { padding: '15px', backgroundColor: '#e9f7ff', border: '1px solid #91d5ff', borderRadius: '8px', marginBottom: '5px' }; 
@@ -763,6 +640,5 @@ const customItemListItemStyle = { display: 'flex', justifyContent: 'space-betwee
 const addSpecialButtonStyle = { padding: '10px', backgroundColor: '#007bff', color: 'white', border: 'none', borderRadius: '5px', marginLeft: '5px', flexShrink: 0 };
 const removeCustomButtonStyle = { backgroundColor: 'transparent', border: '1px solid #dc3545', color: '#dc3545', padding: '2px 5px', borderRadius: '4px', cursor: 'pointer' };
 const grandTotalRowStyle = { marginTop: '5px', paddingTop: '5px', borderTop: '2px solid #333', fontSize: '1.1rem', fontWeight: 'bold', textAlign: 'right' };
-
 
 export default GuestOrderForm;
