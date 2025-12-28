@@ -13,6 +13,7 @@ import FrontDeskArchival from './components/FrontDeskArchival';
 import KitchenDashboard from './components/KitchenDashboard'; 
 import AccountDashboard from './components/AccountDashboard'; 
 import ManagerDashboard from './components/ManagerDashboard'; 
+import AdminDashboard from './components/AdminDashboard'; // --- NEW IMPORT ---
 
 const ACTIVE_STATUSES = [1, 2, 3, 4, 5, 6];
 
@@ -46,7 +47,7 @@ const checkForActiveOrders = async (guestId) => {
     }
 };
 
-// --- 1. PORTAL / LANDING PAGE ---
+// --- 1. PORTAL / LANDING PAGE (UPDATED WITH ADMIN) ---
 const LandingPage = () => {
     return (
         <div style={landingContainerStyle}>
@@ -64,6 +65,13 @@ const LandingPage = () => {
                         <div style={iconStyle}>🛎️</div>
                         <h3>Staff Operations</h3>
                         <p style={descStyle}>Front Desk & Kitchen</p>
+                    </div>
+                </Link>
+                <Link to="/admin" style={{ textDecoration: 'none' }}>
+                    <div style={{ ...cardStyle, borderTop: '5px solid #6c757d' }}>
+                        <div style={iconStyle}>🛡️</div>
+                        <h3>System Admin</h3>
+                        <p style={descStyle}>Inventory & Health</p>
                     </div>
                 </Link>
                 <Link to="/account" style={{ textDecoration: 'none' }}>
@@ -88,7 +96,7 @@ const LandingPage = () => {
 // --- 2. GUEST PAGE (OPTIMIZED) ---
 const GuestPage = () => {
     const navigate = useNavigate();
-    const location = useLocation(); // Used to detect navigation events
+    const location = useLocation(); 
     const [user, setUser] = useState(null);
     const [loading, setLoading] = useState(true);
     const [currentView, setCurrentView] = useState('order'); 
@@ -96,7 +104,6 @@ const GuestPage = () => {
 
     const auth = getAuth();
 
-    // PERSISTENCE FIX: Stable Auth Listener with Cleanup
     useEffect(() => {
         let isMounted = true;
         const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
@@ -117,7 +124,6 @@ const GuestPage = () => {
         return () => { isMounted = false; unsubscribe(); };
     }, [auth]);
 
-    // NAVIGATION FIX: Force a data refresh when coming back to this route
     useEffect(() => {
         if (user) {
             setRefreshKey(Date.now());
@@ -189,7 +195,7 @@ const GuestPage = () => {
     );
 };
 
-// --- STAFF PORTAL SELECTION ---
+// --- STAFF PORTAL ---
 const StaffPortal = () => {
     const navigate = useNavigate();
     return (
@@ -245,6 +251,17 @@ const KitchenPage = () => {
     );
 };
 
+// --- ADMIN PAGE ---
+const AdminPage = () => {
+    const navigate = useNavigate();
+    return (
+        <div style={pageWrapperStyle}>
+            <button onClick={() => navigate('/')} style={homeButtonStyle}>🏠 Home</button>
+            <AdminDashboard />
+        </div>
+    );
+};
+
 const AccountPage = () => {
     const navigate = useNavigate();
     return (
@@ -280,6 +297,7 @@ function App() {
                     <Route path="/staff" element={<StaffPortal />} />
                     <Route path="/staff/frontdesk" element={<FrontDeskPage />} />
                     <Route path="/staff/kitchen" element={<KitchenPage />} />
+                    <Route path="/admin" element={<AdminPage />} /> {/* --- NEW ROUTE --- */}
                     <Route path="/account" element={<AccountPage />} />
                     <Route path="/manager" element={<ManagerPage />} />
                     <Route path="*" element={<div style={{textAlign: 'center', padding: '50px'}}>Page not found. <Link to="/">Go Home</Link></div>} />
@@ -290,7 +308,7 @@ function App() {
   );
 }
 
-// --- STYLES ---
+// --- STYLES (Unchanged) ---
 const staffPanelWrapperStyle = { padding: '15px', border: '1px solid #ccc', borderRadius: '8px', backgroundColor: '#f8f9fa', margin: '20px auto', maxWidth: '1200px' };
 const appContainerStyle = { maxWidth: '1200px', margin: '0 auto', padding: '20px', fontFamily: 'Arial, sans-serif' };
 const headerStyle = { textAlign: 'center', paddingBottom: '10px', borderBottom: '2px solid #eee' };

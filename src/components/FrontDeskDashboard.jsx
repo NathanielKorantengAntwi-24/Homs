@@ -1,11 +1,9 @@
-import React, { useState, useEffect, useMemo } from 'react'; 
+import React, { useState, useEffect, useMemo, useRef } from 'react'; 
 import { useRealTimeOrders } from '../hooks/useRealTimeOrders'; 
 import { confirmOrder, updateOrderStatus, cancelOrder, updateCustomItemPrices } from '../utils/orderActions'; 
 import { getStatusDetails } from '../utils/statusMapping'; 
-import { collection, addDoc, onSnapshot, query, orderBy, serverTimestamp, doc, updateDoc, deleteDoc } from 'firebase/firestore';
+import { collection, addDoc, onSnapshot, query, orderBy, serverTimestamp, doc, updateDoc } from 'firebase/firestore';
 import { db } from '../config/firebase';
-
-import FrontDeskArchival from './FrontDeskArchival';
 
 const ACTIVE_MONITORING_STATUSES = [1, 2, 3, 4, 5, 6]; 
 const CURRENT_FRONT_DESK_ID = "FD_User_A"; 
@@ -49,13 +47,47 @@ function FrontDeskDashboard() {
     const [editingPriceIndex, setEditingPriceIndex] = useState(null); 
     const [expandedOrderId, setExpandedOrderId] = useState(null);
 
+    // --- VOICE ALERT STATES ---
+    const [voiceEnabled, setVoiceEnabled] = useState(false);
+    const lastPendingCountRef = useRef(0);
+
     useEffect(() => {
         const q = query(collection(db, 'kitchen_notes'), orderBy('createdAt', 'desc'));
         const unsubscribe = onSnapshot(q, (snapshot) => {
-            setSentMessages(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+            const allMsgs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+            setSentMessages(allMsgs.filter(m => !m.deletedByFrontDesk));
         });
         return () => unsubscribe();
     }, []);
+
+    // --- VOICE ALERT LOGIC (Triggered on Status 1) ---
+    useEffect(() => {
+        if (activeLoading) return;
+
+        // Watch for Status 1 (Pending) orders
+        const pendingOrders = activeData.filter(o => o.currentStatus === 1);
+        const currentCount = pendingOrders.length;
+
+        if (voiceEnabled && currentCount > lastPendingCountRef.current) {
+            const utterance = new SpeechSynthesisUtterance("Hello FrontDesk! ,You have received a new order");
+            const voices = window.speechSynthesis.getVoices();
+            
+            // Priority list for female voices
+            const femaleVoice = voices.find(v => 
+                v.name.includes('Google UK English Female') || 
+                v.name.includes('Female') || 
+                v.name.includes('Zira') || 
+                v.name.includes('Samantha')
+            );
+
+            if (femaleVoice) utterance.voice = femaleVoice;
+            utterance.rate = 0.9;
+            utterance.pitch = 1.1; 
+            window.speechSynthesis.speak(utterance);
+        }
+
+        lastPendingCountRef.current = currentCount;
+    }, [activeData, activeLoading, voiceEnabled]);
 
     const liveOrdersOnly = useMemo(() => {
         return activeData.filter(o => ACTIVE_MONITORING_STATUSES.includes(o.currentStatus));
@@ -80,7 +112,7 @@ function FrontDeskDashboard() {
 
     const handleCancelWithGuard = async (orderId) => {
         if (window.confirm("Are you sure you want to cancel this order? This action cannot be undone.")) {
-            try { await cancelOrder(orderId, CURRENT_FRONT_DESK_ID); } catch (e) { alert("Error: " + e.message); }
+            try { await cancelOrder(orderId, CURRENT_FRONT_DES_ID); } catch (e) { alert("Error: " + e.message); }
         }
     };
 
@@ -135,7 +167,6 @@ function FrontDeskDashboard() {
         return (
             <div key={order.id} style={{ ...orderCardStyle, borderTop: `6px solid ${color}` }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                    {/* RESTORED: Exact full original ID in Operations */}
                     <h4 style={{fontSize: '0.75rem', marginBottom: '8px', fontFamily: 'monospace', wordBreak: 'break-all'}}>ID: {order.id}</h4>
                     {order.prepTime && <span style={prepTimeBadgeStyle}>⏱️ {order.prepTime}</span>}
                 </div>
@@ -182,7 +213,6 @@ function FrontDeskDashboard() {
                     {order.currentStatus === 1 && (
                         <button onClick={() => confirmOrder(order.id, CURRENT_FRONT_DESK_ID)} style={{...confirmButtonStyle, opacity: order.items.some(i => i.price <= 0) ? 0.5 : 1}} disabled={order.items.some(i => i.price <= 0)}>Accept</button>
                     )}
-                    {order.currentStatus === 6 && <button onClick={() => updateOrderStatus(order.id, 7, CURRENT_FRONT_DESK_ID)} style={confirmButtonStyle}>Complete</button>}
                     {order.currentStatus <= 2 && <button onClick={() => handleCancelWithGuard(order.id)} style={cancelFrontDeskButtonStyle}>Cancel</button>}
                 </div>
             </div>
@@ -193,9 +223,16 @@ function FrontDeskDashboard() {
         <div style={{ padding: '15px', backgroundColor: '#f4f7f6', minHeight: '100vh' }}>
             <div style={hubNav}>
                 <button onClick={() => setActiveHubView('operations')} style={activeHubView === 'operations' ? activeHubBtn : hubBtn}>📋 OPERATIONS</button>
-                <button onClick={() => setActiveHubView('final')} style={activeHubView === 'final' ? activeHubBtn : hubBtn}>🛎️ FINAL ACTIONS</button>
                 <button onClick={() => setActiveHubView('history')} style={activeHubView === 'history' ? activeHubBtn : hubBtn}>📜 HISTORY</button>
                 <button onClick={() => setActiveHubView('messenger')} style={activeHubView === 'messenger' ? activeHubBtn : hubBtn}>💬 KITCHEN MSG</button>
+                
+                {/* VOICE ALERT TOGGLE */}
+                <button 
+                    onClick={() => setVoiceEnabled(!voiceEnabled)} 
+                    style={{...hubBtn, backgroundColor: voiceEnabled ? '#2ecc71' : '#e74c3c', marginLeft: '10px'}}
+                >
+                    {voiceEnabled ? '🔊 Voice On' : '🔇 Voice Off'}
+                </button>
             </div>
 
             {activeHubView === 'operations' && (
@@ -222,10 +259,6 @@ function FrontDeskDashboard() {
                 </>
             )}
 
-            {activeHubView === 'final' && (
-                <FrontDeskArchival isActive={activeHubView === 'final'} orders={liveOrdersOnly} />
-            )}
-
             {activeHubView === 'history' && (
                 <div style={{maxWidth: '850px', margin: '0 auto', background: '#fff', padding: '25px', borderRadius: '12px', boxShadow: '0 4px 15px rgba(0,0,0,0.05)'}}>
                     <h2 style={{borderBottom: '2px solid #f0f0f0', paddingBottom: '15px', marginBottom: '20px'}}>Past Orders</h2>
@@ -238,7 +271,6 @@ function FrontDeskDashboard() {
                                     <div style={historyHeaderStyle}>
                                         <div style={historyHeaderRowStyle}>
                                             <div style={{display: 'flex', flexDirection: 'column', gap: '2px'}}>
-                                                {/* RESTORED: Exact full original ID in History */}
                                                 <span style={{ fontWeight: 'bold', fontSize: '0.85rem', fontFamily: 'monospace', color: '#1e293b' }}>
                                                     FULL ID: {o.id}
                                                 </span>
@@ -308,7 +340,11 @@ function FrontDeskDashboard() {
                                 <p style={{whiteSpace: 'pre-wrap', margin: '10px 0'}}>{m.message}</p>
                                 <div style={{display:'flex', gap: '10px'}}>
                                     <button onClick={() => {setEditingId(m.id); setMsgForm({ name: m.sender, message: m.message, date: m.date, time: m.time })}} style={editActionBtn}>✏️ Edit</button>
-                                    <button onClick={async () => {if(window.confirm("Delete broadcast?")) await deleteDoc(doc(db, 'kitchen_notes', m.id))}} style={delActionBtn}>🗑️ Del</button>
+                                    <button onClick={async () => {
+                                        if(window.confirm("Delete broadcast?")) {
+                                            await updateDoc(doc(db, 'kitchen_notes', m.id), { deletedByFrontDesk: true });
+                                        }
+                                    }} style={delActionBtn}>🗑️ Del</button>
                                 </div>
                             </div>
                         ))}
