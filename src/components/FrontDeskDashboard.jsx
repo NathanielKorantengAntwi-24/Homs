@@ -47,9 +47,11 @@ function FrontDeskDashboard() {
     const [editingPriceIndex, setEditingPriceIndex] = useState(null); 
     const [expandedOrderId, setExpandedOrderId] = useState(null);
 
-    // --- VOICE ALERT STATES ---
+    // --- VOICE & PAYMENT ALERT STATES ---
     const [voiceEnabled, setVoiceEnabled] = useState(false);
     const lastPendingCountRef = useRef(0);
+    const prevPaidIdsRef = useRef(new Set());
+    const [justPaidId, setJustPaidId] = useState(null); 
 
     useEffect(() => {
         const q = query(collection(db, 'kitchen_notes'), orderBy('createdAt', 'desc'));
@@ -60,32 +62,45 @@ function FrontDeskDashboard() {
         return () => unsubscribe();
     }, []);
 
-    // --- VOICE ALERT LOGIC (Triggered on Status 1) ---
-    useEffect(() => {
-        if (activeLoading) return;
+    // --- PAYMENT NOTIFICATION OBSERVER ---
+   // --- UPDATED: PAYMENT NOTIFICATION OBSERVER ---
+useEffect(() => {
+    if (activeLoading) return;
+    
+    const currentPaidIds = new Set(activeData.filter(o => o.paymentStatus === 'paid').map(o => o.id));
+    const newlyPaidId = [...currentPaidIds].find(id => !prevPaidIdsRef.current.has(id));
 
-        // Watch for Status 1 (Pending) orders
-        const pendingOrders = activeData.filter(o => o.currentStatus === 1);
-        const currentCount = pendingOrders.length;
+    if (newlyPaidId) {
+        // 1. Play the Chime
+        const chime = new Audio('https://assets.mixkit.co/active_storage/sfx/1017/1017-preview.mp3');
+        chime.play().catch(() => {});
 
-        if (voiceEnabled && currentCount > lastPendingCountRef.current) {
-            const utterance = new SpeechSynthesisUtterance("Hello FrontDesk! ,You have received a new order");
-            const voices = window.speechSynthesis.getVoices();
-            
-            // Priority list for female voices
-            const femaleVoice = voices.find(v => 
-                v.name.includes('Google UK English Female') || 
-                v.name.includes('Female') || 
-                v.name.includes('Zira') || 
-                v.name.includes('Samantha')
-            );
-
-            if (femaleVoice) utterance.voice = femaleVoice;
-            utterance.rate = 0.9;
-            utterance.pitch = 1.1; 
+        // 2. Add Voice Alert
+        if (voiceEnabled) {
+            const utterance = new SpeechSynthesisUtterance("A new payment has been received.");
+            utterance.rate = 1.0;
             window.speechSynthesis.speak(utterance);
         }
 
+        setJustPaidId(newlyPaidId);
+        setTimeout(() => setJustPaidId(null), 5000);
+    }
+    prevPaidIdsRef.current = currentPaidIds;
+}, [activeData, activeLoading, voiceEnabled]); // Added voiceEnabled to dependencies
+
+    // --- VOICE ALERT LOGIC ---
+    useEffect(() => {
+        if (activeLoading) return;
+        const pendingOrders = activeData.filter(o => o.currentStatus === 1);
+        const currentCount = pendingOrders.length;
+        if (voiceEnabled && currentCount > lastPendingCountRef.current) {
+            const utterance = new SpeechSynthesisUtterance("Hello FrontDesk! ,You have received a new order");
+            const voices = window.speechSynthesis.getVoices();
+            const femaleVoice = voices.find(v => v.name.includes('Female') || v.name.includes('Google UK English Female'));
+            if (femaleVoice) utterance.voice = femaleVoice;
+            utterance.rate = 0.9; utterance.pitch = 1.1; 
+            window.speechSynthesis.speak(utterance);
+        }
         lastPendingCountRef.current = currentCount;
     }, [activeData, activeLoading, voiceEnabled]);
 
@@ -102,7 +117,6 @@ function FrontDeskDashboard() {
             const matchesSearch = o.roomNumber?.toLowerCase().includes(s) || 
                                  location.toLowerCase().includes(s) || 
                                  (o.id || "").toLowerCase().includes(s);
-            
             if (!matchesSearch) return false;
             if (activeFilterStatus === 0) return true;
             if (activeFilterStatus === 5) return (o.currentStatus === 5 || o.currentStatus === 6);
@@ -112,33 +126,69 @@ function FrontDeskDashboard() {
 
     const handleCancelWithGuard = async (orderId) => {
         if (window.confirm("Are you sure you want to cancel this order? This action cannot be undone.")) {
-            try { await cancelOrder(orderId, CURRENT_FRONT_DES_ID); } catch (e) { alert("Error: " + e.message); }
+            try { await cancelOrder(orderId, CURRENT_FRONT_DESK_ID); } catch (e) { alert("Error: " + e.message); }
         }
     };
 
     const handleSavePrice = async (orderId, itemIndex) => {
-        const priceValue = tempPrices[`${orderId}-${itemIndex}`];
-        const newPrice = parseFloat(priceValue);
-        if (isNaN(newPrice) || newPrice < 0) return alert("Please enter a valid price");
-        const order = activeData.find(o => o.id === orderId);
-        if (!order) return;
-        const updatedItems = [...order.items];
-        updatedItems[itemIndex] = { ...updatedItems[itemIndex], price: newPrice };
+    const priceValue = tempPrices[`${orderId}-${itemIndex}`];
+    const newPrice = parseFloat(priceValue);
+    
+    if (isNaN(newPrice) || newPrice < 0) return alert("Please enter a valid price");
+    
+    const order = activeData.find(o => o.id === orderId);
+    if (!order) return;
+
+    // 1. Create the updated items array
+    const updatedItems = [...order.items];
+    updatedItems[itemIndex] = { ...updatedItems[itemIndex], price: newPrice };
+
+    // 2. 🔥 RECALCULATE TOTALS (The Missing Step)
+    const newSubtotal = updatedItems.reduce((sum, item) => {
+        return sum + (item.qty * (item.price || 0));
+    }, 0);
+
+    const serviceCharge = order.financials?.serviceCharge || 0;
+    const newGrandTotal = newSubtotal + serviceCharge;
+
+    try {
+        const orderRef = doc(db, 'orders', orderId);
+        
+        // 3. UPDATE EVERYTHING: Items AND the Financial fields
+        await updateDoc(orderRef, {
+            items: updatedItems,
+            // Use dot notation to update nested fields without overwriting the whole object
+            "financials.subtotal": newSubtotal,
+            "financials.grandTotal": newGrandTotal,
+            priceUpdatedAt: serverTimestamp(),
+            lastUpdatedBy: CURRENT_FRONT_DESK_ID
+        });
+
+        // 4. Cleanup UI state
+        setEditingPriceIndex(null);
+        const newTempPrices = { ...tempPrices };
+        delete newTempPrices[`${orderId}-${itemIndex}`];
+        setTempPrices(newTempPrices);
+
+    } catch (e) { 
+        console.error("Price Update Error:", e);
+        alert("Error: " + e.message); 
+    }
+};
+    const requestGuestPayment = async (orderId) => {
         try {
-            await updateCustomItemPrices(orderId, updatedItems, order.orderType, CURRENT_FRONT_DESK_ID);
-            setEditingPriceIndex(null);
+            await updateDoc(doc(db, 'orders', orderId), {
+                paymentStatus: 'unpaid',
+                paymentRequestedAt: serverTimestamp()
+            });
         } catch (e) { alert("Error: " + e.message); }
     };
 
     const handleSendBroadcast = async () => {
         if(!msgForm.name || !msgForm.message) return alert("Name and Message are required");
         const payload = {
-            sender: msgForm.name,
-            message: msgForm.message,
-            date: msgForm.date,
-            time: msgForm.time,
-            updatedAt: serverTimestamp(),
-            status: 'unread'
+            sender: msgForm.name, message: msgForm.message, date: msgForm.date,
+            time: msgForm.time, updatedAt: serverTimestamp(), status: 'unread'
         };
         try {
             if (editingId) {
@@ -147,9 +197,7 @@ function FrontDeskDashboard() {
             } else {
                 await addDoc(collection(db, 'kitchen_notes'), { ...payload, createdAt: serverTimestamp() });
             }
-            setMsgForm({
-                name: msgForm.name, message: '',
-                date: new Date().toISOString().split('T')[0],
+            setMsgForm({ name: msgForm.name, message: '', date: new Date().toISOString().split('T')[0],
                 time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })
             });
         } catch (e) { alert("Error: " + e.message); }
@@ -160,20 +208,30 @@ function FrontDeskDashboard() {
         const label = details?.label || STATUS_BACKUP[order.currentStatus]?.label || "ACTIVE";
         const color = details?.color || STATUS_BACKUP[order.currentStatus]?.color || "#ccc";
         const displayLocation = order.orderType === 'Dining Hall' ? order.dispatchLocation : order.roomNumber;
-        
         const confirmedEntry = order.statusHistory?.find(entry => entry.status === 2);
         const confirmationTime = confirmedEntry ? formatTimeLong(confirmedEntry.timestamp) : 'Not Confirmed';
 
+        const isNewlyPaid = justPaidId === order.id;
+        const hasUnpricedItems = order.items.some(i => (i.price || 0) <= 0);
+        const pStatus = (order.paymentStatus || 'unpaid').toUpperCase();
+        const pColor = order.paymentStatus === 'paid' ? '#2ecc71' : '#e74c3c';
+
         return (
-            <div key={order.id} style={{ ...orderCardStyle, borderTop: `6px solid ${color}` }}>
+            <div key={order.id} style={{ 
+                ...orderCardStyle, 
+                borderTop: `6px solid ${color}`,
+                backgroundColor: isNewlyPaid ? '#f0fff4' : '#fff',
+                transition: 'all 0.5s ease'
+            }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
                     <h4 style={{fontSize: '0.75rem', marginBottom: '8px', fontFamily: 'monospace', wordBreak: 'break-all'}}>ID: {order.id}</h4>
-                    {order.prepTime && <span style={prepTimeBadgeStyle}>⏱️ {order.prepTime}</span>}
+                    {isNewlyPaid ? <span style={newlyPaidBadgeStyle}>NEWLY PAID ✅</span> : (order.prepTime && <span style={prepTimeBadgeStyle}>⏱️ {order.prepTime}</span>)}
                 </div>
                 
                 <p style={infoLine}>Status: <strong style={{color}}>{label.toUpperCase()}</strong></p>
                 <p style={infoLine}>Loc: <strong>{displayLocation}</strong> | WA: <strong>{order.whatsappNumber || 'N/A'}</strong></p>
                 {order.serverName && <p style={infoLine}>Server: <strong>{order.serverName}</strong></p>}
+                <p style={infoLine}>Payment: <strong style={{color: pColor}}>{pStatus}</strong></p>
                 
                 <div style={notesContainerStyle}><strong>Special Request:</strong><p style={{margin: '3px 0 0 0'}}>{order.notes || 'NA'}</p></div>
                 
@@ -186,17 +244,17 @@ function FrontDeskDashboard() {
                                     <div style={{display:'flex', justifyContent:'space-between', width: '100%', alignItems: 'center'}}>
                                         <span>{item.qty}x {item.name}</span>
                                         <div style={{display: 'flex', alignItems: 'center', gap: '8px'}}>
-                                            <span>{CURRENCY_SYMBOL}{((item.price || 0) * item.qty).toFixed(2)}</span>
-                                            {order.currentStatus === 1 && item.type === 'special' && !isEditing && (
-                                                <button onClick={() => {setEditingPriceIndex(`${order.id}-${idx}`); setTempPrices({...tempPrices, [`${order.id}-${idx}`]: item.price});}} style={{fontSize: '0.6rem', padding: '2px 4px', cursor: 'pointer', backgroundColor: '#f1c40f', border: 'none', borderRadius: '3px'}}>Edit Price</button>
+                                            <span style={{color: item.price > 0 ? '#000' : '#e74c3c'}}>{CURRENCY_SYMBOL}{((item.price || 0) * item.qty).toFixed(2)}</span>
+                                            {order.currentStatus === 1 && (item.type === 'special' || item.type === 'custom') && !isEditing && (
+                                                <button onClick={() => {setEditingPriceIndex(`${order.id}-${idx}`); setTempPrices({...tempPrices, [`${order.id}-${idx}`]: item.price});}} style={editPriceBtnStyle}>Edit Price</button>
                                             )}
                                         </div>
                                     </div>
                                     {isEditing && (
                                         <div style={{display: 'flex', gap: '5px', marginTop: '5px', width: '100%'}}>
                                             <input type="number" style={{flex: 1, fontSize: '0.7rem'}} value={tempPrices[`${order.id}-${idx}`] ?? ''} onChange={(e) => setTempPrices({...tempPrices, [`${order.id}-${idx}`]: e.target.value})} />
-                                            <button onClick={() => handleSavePrice(order.id, idx)} style={{fontSize: '0.65rem', backgroundColor: '#3498db', color: '#fff', border: 'none', padding: '2px 8px'}}>Save</button>
-                                            <button onClick={() => setEditingPriceIndex(null)} style={{fontSize: '0.65rem', backgroundColor: '#999', color: '#fff', border: 'none', padding: '2px 8px'}}>X</button>
+                                            <button onClick={() => handleSavePrice(order.id, idx)} style={savePriceBtnStyle}>Save</button>
+                                            <button onClick={() => setEditingPriceIndex(null)} style={cancelEditBtnStyle}>X</button>
                                         </div>
                                     )}
                                 </li>
@@ -211,7 +269,10 @@ function FrontDeskDashboard() {
 
                 <div style={{ display: 'flex', gap: '5px', marginTop: '10px' }}>
                     {order.currentStatus === 1 && (
-                        <button onClick={() => confirmOrder(order.id, CURRENT_FRONT_DESK_ID)} style={{...confirmButtonStyle, opacity: order.items.some(i => i.price <= 0) ? 0.5 : 1}} disabled={order.items.some(i => i.price <= 0)}>Accept</button>
+                        <button onClick={() => confirmOrder(order.id, CURRENT_FRONT_DESK_ID)} style={{...confirmButtonStyle, opacity: hasUnpricedItems ? 0.5 : 1}} disabled={hasUnpricedItems}>Accept</button>
+                    )}
+                    {order.currentStatus === 1 && order.paymentStatus === 'pending_price' && !hasUnpricedItems && (
+                        <button onClick={() => requestGuestPayment(order.id)} style={{...confirmButtonStyle, backgroundColor: '#3498db'}}>Req Pay</button>
                     )}
                     {order.currentStatus <= 2 && <button onClick={() => handleCancelWithGuard(order.id)} style={cancelFrontDeskButtonStyle}>Cancel</button>}
                 </div>
@@ -225,14 +286,7 @@ function FrontDeskDashboard() {
                 <button onClick={() => setActiveHubView('operations')} style={activeHubView === 'operations' ? activeHubBtn : hubBtn}>📋 OPERATIONS</button>
                 <button onClick={() => setActiveHubView('history')} style={activeHubView === 'history' ? activeHubBtn : hubBtn}>📜 HISTORY</button>
                 <button onClick={() => setActiveHubView('messenger')} style={activeHubView === 'messenger' ? activeHubBtn : hubBtn}>💬 KITCHEN MSG</button>
-                
-                {/* VOICE ALERT TOGGLE */}
-                <button 
-                    onClick={() => setVoiceEnabled(!voiceEnabled)} 
-                    style={{...hubBtn, backgroundColor: voiceEnabled ? '#2ecc71' : '#e74c3c', marginLeft: '10px'}}
-                >
-                    {voiceEnabled ? '🔊 Voice On' : '🔇 Voice Off'}
-                </button>
+                <button onClick={() => setVoiceEnabled(!voiceEnabled)} style={{...hubBtn, backgroundColor: voiceEnabled ? '#2ecc71' : '#e74c3c', marginLeft: '10px'}}>{voiceEnabled ? '🔊 Voice On' : '🔇 Voice Off'}</button>
             </div>
 
             {activeHubView === 'operations' && (
@@ -271,9 +325,7 @@ function FrontDeskDashboard() {
                                     <div style={historyHeaderStyle}>
                                         <div style={historyHeaderRowStyle}>
                                             <div style={{display: 'flex', flexDirection: 'column', gap: '2px'}}>
-                                                <span style={{ fontWeight: 'bold', fontSize: '0.85rem', fontFamily: 'monospace', color: '#1e293b' }}>
-                                                    FULL ID: {o.id}
-                                                </span>
+                                                <span style={{ fontWeight: 'bold', fontSize: '0.85rem', fontFamily: 'monospace', color: '#1e293b' }}>FULL ID: {o.id}</span>
                                                 <span style={{ fontSize: '0.9rem', color: '#2c3e50', fontWeight: '600' }}>Location: {displayLoc}</span>
                                             </div>
                                             <span style={historyTotalStyle}>{CURRENCY_SYMBOL}{(o.financials?.grandTotal || 0).toFixed(2)}</span>
@@ -356,6 +408,10 @@ function FrontDeskDashboard() {
 }
 
 // STYLES
+const newlyPaidBadgeStyle = { backgroundColor: '#2ecc71', color: 'white', fontSize: '0.65rem', padding: '2px 8px', borderRadius: '4px', fontWeight: 'bold' };
+const editPriceBtnStyle = { fontSize: '0.6rem', padding: '2px 4px', cursor: 'pointer', backgroundColor: '#f1c40f', border: 'none', borderRadius: '3px' };
+const savePriceBtnStyle = { fontSize: '0.65rem', backgroundColor: '#3498db', color: '#fff', border: 'none', padding: '2px 8px' };
+const cancelEditBtnStyle = { fontSize: '0.65rem', backgroundColor: '#999', color: '#fff', border: 'none', padding: '2px 8px' };
 const prepTimeBadgeStyle = { backgroundColor: '#fff7ed', color: '#c2410c', border: '1px solid #ffedd5', padding: '2px 6px', borderRadius: '4px', fontSize: '0.7rem', fontWeight: 'bold' };
 const historyCardStyle = { margin: '10px 0', padding: '15px', border: '1px solid #ddd', borderRadius: '8px', backgroundColor: '#fff', fontSize: '0.9em', cursor: 'pointer' };
 const historyHeaderStyle = { display: 'flex', flexDirection: 'column', gap: '4px' };

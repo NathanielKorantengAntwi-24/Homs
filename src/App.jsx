@@ -161,7 +161,15 @@ const GuestPage = () => {
             <button onClick={handleLogout} style={logoutButtonStyle}>Sign Out</button>
             
             <div style={sectionStyle}>
-                <h2 style={{color: '#007bff', borderBottom: '2px solid #eee', paddingBottom: '10px'}}>
+                <h2 style={{
+                    color: '#0047AB',               // The "Luxury Concierge" Cobalt Blue
+                    borderBottom: '1px solid #E8E8E1', 
+                    paddingBottom: '15px', 
+                    fontWeight: '900',              // Bold, authoritative weight
+                    fontSize: '1.6rem',             // Slightly larger for impact
+                    letterSpacing: '-1px',          // Tight luxury spacing
+                    textTransform: 'none'           // Keeps the name feeling personal
+                }}>
                     Welcome, {displayName}!
                 </h2>
 
@@ -322,10 +330,41 @@ const pageWrapperStyle = { position: 'relative' };
 const homeButtonStyle = { position: 'absolute', top: '-60px', left: '0', padding: '8px 12px', backgroundColor: '#6c757d', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', zIndex: 1000 };
 const logoutButtonStyle = { position: 'absolute', top: '-60px', right: '0', padding: '8px 12px', backgroundColor: '#dc3545', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', zIndex: 1000 };
 const sectionStyle = { marginBottom: '40px', padding: '20px', backgroundColor: '#e6f7ff', borderRadius: '8px', maxWidth: '800px', margin: '0 auto' };
-const navButtonContainerStyle = { display: 'flex', gap: '10px', marginBottom: '20px', marginTop: '10px', borderBottom: '2px solid #ddd', paddingBottom: '10px' };
-const baseNavButtonStyle = { padding: '10px 15px', border: '1px solid #007bff', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold', flexGrow: 1, textAlign: 'center' };
-const activeNavButtonStyle = { ...baseNavButtonStyle, backgroundColor: '#007bff', color: 'white' };
-const inactiveNavButtonStyle = { ...baseNavButtonStyle, backgroundColor: '#fff', color: '#007bff' };
+const navButtonContainerStyle = { 
+    display: 'flex', 
+    gap: '8px', 
+    marginBottom: '25px', 
+    marginTop: '15px', 
+    backgroundColor: '#F7F7F2', // Soft stone background for the "pill" container
+    padding: '6px',
+    borderRadius: '20px',
+    border: '1px solid #E8E8E1'
+};
+const baseNavButtonStyle = { 
+    padding: '14px 10px', 
+    border: 'none', 
+    borderRadius: '16px', 
+    cursor: 'pointer', 
+    fontWeight: '800', 
+    flexGrow: 1, 
+    textAlign: 'center',
+    fontSize: '0.85rem',
+    textTransform: 'uppercase',
+    letterSpacing: '1px',
+    transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+    fontFamily: "'Inter', sans-serif"
+};
+const activeNavButtonStyle = { 
+    ...baseNavButtonStyle, 
+    backgroundColor: '#121212', // Carbon Black (Replaces #007bff)
+    color: '#FFFFFF',          // Pure White text
+    boxShadow: '0 8px 16px rgba(0,0,0,0.12)' 
+};
+const inactiveNavButtonStyle = { 
+    ...baseNavButtonStyle, 
+    backgroundColor: 'transparent', 
+    color: '#888888' // Muted gray for inactive tabs
+};
 const viewTitleStyle = { color: '#007bff', borderBottom: '2px solid #eee', paddingBottom: '5px', marginBottom: '20px' };
 const contentWrapperStyle = { padding: '10px 0' };
 

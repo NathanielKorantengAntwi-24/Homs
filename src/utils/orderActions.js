@@ -1,4 +1,4 @@
-import { doc, updateDoc, arrayUnion, deleteDoc, runTransaction, Timestamp } from 'firebase/firestore'; 
+import { doc, updateDoc, arrayUnion, deleteDoc, runTransaction, Timestamp, addDoc, collection, serverTimestamp } from 'firebase/firestore'; 
 import { db } from '../config/firebase'; 
 
 const ROOM_SERVICE_FLAT_CHARGE = 30.00; 
@@ -25,6 +25,32 @@ function getStatusName(statusId) {
         8: "ARCHIVED", "-1": "PRICE_UPDATED", 
     };
     return names[statusId] || "Unknown";
+}
+
+// --- NEW: KITCHEN BROADCAST WITH 2-DAY TTL ---
+/**
+ * Sends a message to the kitchen that automatically deletes after 2 days.
+ */
+export async function broadcastToKitchen(message, sender = "Front Desk") {
+    try {
+        // Calculate expiration: 48 hours from now
+        const twoDaysInMs = 2 * 24 * 60 * 60 * 1000;
+        const expirationDate = new Date(Date.now() + twoDaysInMs);
+
+        await addDoc(collection(db, 'kitchen_notes'), {
+            message,
+            sender,
+            date: new Date().toISOString().split('T')[0],
+            time: new Date().toLocaleTimeString(),
+            createdAt: serverTimestamp(),
+            // The "Janitor" field for Firestore TTL
+            expireAt: Timestamp.fromDate(expirationDate) 
+        });
+        return { success: true };
+    } catch (error) {
+        console.error("Broadcast failed:", error);
+        throw new Error("Failed to send kitchen broadcast.");
+    }
 }
 
 // --- 1. ATOMIC PRICE UPDATE (Transaction) ---
@@ -69,12 +95,10 @@ export async function confirmOrder(orderId, frontDeskUserId) {
             
             const orderData = orderDoc.data();
 
-            // Guard: Prevent confirming if already confirmed or cancelled
             if (orderData.currentStatus !== 1) {
                 throw new Error(`Cannot confirm. Order is currently ${getStatusName(orderData.currentStatus)}`);
             }
 
-            // Guard: Check for unpriced specials
             const hasUnpriced = orderData.items.some(i => i.type === 'special' && i.price <= 0);
             if (hasUnpriced) throw new Error("All special items must be priced before confirmation.");
 

@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo } from 'react';
 import { collection, query, where, onSnapshot, orderBy } from 'firebase/firestore'; 
 import { db } from '../config/firebase'; 
 
+// 1. NAMED EXPORT: This satisfies FrontDesk, Kitchen, GuestTracker, and Manager
 export function useRealTimeOrders(filterKey, filterValue, statusFilter = null, enabled = true) {
     const [orders, setOrders] = useState([]);
     const [loading, setLoading] = useState(true);
@@ -32,7 +33,6 @@ export function useRealTimeOrders(filterKey, filterValue, statusFilter = null, e
             queryConstraints.push(where("currentStatus", "in", currentStatusArray));
         } 
         
-        // Ensure standard ordering
         queryConstraints.push(orderBy("orderTime", "desc"));
 
         const q = query(ordersRef, ...queryConstraints);
@@ -43,7 +43,6 @@ export function useRealTimeOrders(filterKey, filterValue, statusFilter = null, e
                 return {
                     id: doc.id,
                     ...data,
-                    // Robust date parsing
                     orderTime: data.orderTime?.toDate ? data.orderTime.toDate() : (data.orderTime ? new Date(data.orderTime) : new Date()), 
                     archivalDate: data.archivalDate?.toDate ? data.archivalDate.toDate() : data.archivalDate
                 };
@@ -61,3 +60,6 @@ export function useRealTimeOrders(filterKey, filterValue, statusFilter = null, e
 
     return { orders, loading }; 
 }
+
+// 2. DEFAULT EXPORT: This satisfies your updated AccountDashboard
+export default useRealTimeOrders;
