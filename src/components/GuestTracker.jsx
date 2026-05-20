@@ -1,12 +1,11 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { useRealTimeOrders } from '../hooks/useRealTimeOrders';
 import { getStatusDetails } from '../utils/statusMapping';
 import { cancelOrder } from '../utils/orderActions'; 
 import { usePaystackPayment } from 'react-paystack'; 
-import { doc, updateDoc, serverTimestamp, getDoc } from 'firebase/firestore';
+import { doc, updateDoc, serverTimestamp, onSnapshot, deleteDoc } from 'firebase/firestore';
 import { db } from '../config/firebase';
 import { requestNotificationPermission } from '../config/firebase';
-// --- NEW IMPORTS FOR PDF ---
 import jsPDF from 'jspdf';
 import html2canvas from 'html2canvas';
 
@@ -19,13 +18,40 @@ const PAYSTACK_PUBLIC_KEY = import.meta.env.VITE_PAYSTACK_PUBLIC_KEY || "pk_test
 const ACTIVE_STATUSES = [1, 2, 3, 4, 5, 6];
 const HISTORY_STATUSES = [0, 7, 8];
 
-// --- SUB-COMPONENT: RECEIPT MODAL ---
-const ReceiptModal = ({ order, onClose }) => {
+// --- RESPONSIVE HELPER STYLESHEET ---
+const ResponsiveTrackerStyles = () => (
+    <style>{`
+        @media (max-width: 768px) {
+            .responsive-page-container {
+                padding: 10px 0 !important;
+                background-color: #FFFFFF !important;
+            }
+            .responsive-tracker-card {
+                max-width: 100% !important;
+                border-radius: 0 !important;
+                border-left: none !important;
+                border-right: none !important;
+                box-shadow: none !important;
+                padding: 24px 16px !important;
+                margin-bottom: 12px !important;
+            }
+            .responsive-breakdown-card {
+                padding: 16px !important;
+                border-radius: 12px !important;
+            }
+            .responsive-settings-container {
+                padding-right: 16px !important;
+            }
+        }
+    `}</style>
+);
+
+// --- SUB-COMPONENT: RECEIPT MODAL (Branded Update) ---
+const ReceiptModal = ({ order, onClose, hotelName, logoUrl }) => { 
     const [isDownloading, setIsDownloading] = useState(false);
 
     if (!order) return null;
 
-    // 🔥 DYNAMIC CALCULATION: Ensures the receipt matches current item prices
     const itemsSubtotal = order.items?.reduce((sum, item) => {
         return sum + (item.qty * (item.price || 0));
     }, 0) || 0;
@@ -42,7 +68,7 @@ const ReceiptModal = ({ order, onClose }) => {
         try {
             const options = {
                 scale: 3, 
-                useCORS: true,
+                useCORS: true, 
                 logging: false,
                 backgroundColor: "#ffffff",
                 ignoreElements: (element) => element.hasAttribute('data-pdf-ignore')
@@ -68,67 +94,74 @@ const ReceiptModal = ({ order, onClose }) => {
     return (
         <div style={modalOverlayStyle}>
             <div style={receiptContainerStyle} id="receipt-content">
-                <button 
-                    onClick={onClose} 
-                    style={closeReceiptXStyle} 
-                    data-pdf-ignore 
-                >✕</button>
+                <button onClick={onClose} style={closeReceiptXStyle} data-pdf-ignore>✕</button>
                 
-                <div style={{ textAlign: 'center', borderBottom: '1px dashed #ccc', paddingBottom: '10px', marginBottom: '15px' }}>
-                    <h2 style={{ margin: 0 }}>HOMS RECEIPT</h2>
-                    <p style={{ fontSize: '0.75rem', color: '#666' }}>Hotel Order Management System</p>
+                {/* 🏷️ DYNAMIC BRANDING HEADER */}
+                <div style={{ textAlign: 'center', borderBottom: '1px dashed #EAE8E1', paddingBottom: '16px', marginBottom: '20px' }}>
+                    {logoUrl ? (
+                        <img 
+                            src={logoUrl} 
+                            alt={`${hotelName} Logo`} 
+                            crossOrigin="anonymous" 
+                            style={{ 
+                                maxHeight: '55px', 
+                                width: 'auto', 
+                                marginBottom: '12px', 
+                                objectFit: 'contain',
+                                display: 'inline-block',
+                                filter: 'contrast(1.15) brightness(0.95) drop-shadow(0px 1px 2px rgba(44, 44, 41, 0.08))',
+                                imageRendering: 'crisp-edges'
+                            }} 
+                        />
+                    ) : (
+                        <div style={{ fontSize: '2rem', marginBottom: '6px' }}>🏨</div>
+                    )}
+                    <h2 style={{ margin: 0, color: '#2C2C29', fontSize: '1.25rem', fontWeight: '900', letterSpacing: '1px', textTransform: 'uppercase' }}>
+                        {hotelName} RECEIPT
+                    </h2>
+                    <p style={{ fontSize: '0.7rem', color: '#A09F9A', marginTop: '4px', letterSpacing: '0.5px' }}>
+                        HOMS
+                    </p>
                 </div>
 
-                <div style={receiptRowStyle}><strong>Order ID:</strong> <span>#{order.id.slice(-8).toUpperCase()}</span></div>
-                <div style={receiptRowStyle}><strong>Date:</strong> <span>{new Date().toLocaleDateString()}</span></div>
-                <div style={receiptRowStyle}><strong>Ref:</strong> <span style={{fontSize: '0.7rem', fontFamily: 'monospace'}}>{order.paystackReference || 'N/A'}</span></div>
+                <div style={receiptRowStyle}><strong>Order ID:</strong> <span style={{ fontWeight: '600' }}>#{order.id.slice(-8).toUpperCase()}</span></div>
+                <div style={receiptRowStyle}><strong>Date:</strong> <span style={{ fontWeight: '600' }}>{new Date().toLocaleDateString()}</span></div>
+                <div style={receiptRowStyle}><strong>Ref:</strong> <span style={{ fontSize: '0.75rem', fontFamily: 'monospace', color: '#666660' }}>{order.paystackReference || 'N/A'}</span></div>
                 
-                <hr style={{ border: 'none', borderTop: '1px solid #eee', margin: '15px 0' }} />
+                <hr style={{ border: 'none', borderTop: '1px solid #EAE8E1', margin: '18px 0' }} />
                 
-                {/* 1. Item List */}
                 {order.items?.map((item, i) => (
                     <div key={i} style={receiptRowStyle}>
                         <span>{item.qty}x {item.name}</span>
-                        <span>{CURRENCY_SYMBOL}{(item.qty * (item.price || 0)).toFixed(2)}</span>
+                        <span style={{ fontWeight: '600' }}>{CURRENCY_SYMBOL}{(item.qty * (item.price || 0)).toFixed(2)}</span>
                     </div>
                 ))}
 
-                {/* 2. Financial Breakdown (Subtotal & Service Charge) */}
-                <div style={{ borderTop: '1px dotted #ccc', marginTop: '10px', paddingTop: '10px' }}>
+                <div style={{ borderTop: '1px dotted #D8D6D0', marginTop: '14px', paddingTop: '14px' }}>
                     <div style={receiptRowStyle}>
-                        <span>Subtotal (Items)</span>
-                        {/* 🔥 Use live itemsSubtotal instead of stored value */}
-                        <span>{CURRENCY_SYMBOL}{itemsSubtotal.toFixed(2)}</span>
+                        <span style={{ color: '#666660' }}>Subtotal (Items)</span>
+                        <span style={{ fontWeight: '600' }}>{CURRENCY_SYMBOL}{itemsSubtotal.toFixed(2)}</span>
                     </div>
                     
                     {serviceCharge > 0 && (
                         <div style={receiptRowStyle}>
-                            <span>Service Charge</span>
-                            <span>{CURRENCY_SYMBOL}{serviceCharge.toFixed(2)}</span>
+                            <span style={{ color: '#666660' }}>Service Charge</span>
+                            <span style={{ fontWeight: '600' }}>{CURRENCY_SYMBOL}{serviceCharge.toFixed(2)}</span>
                         </div>
                     )}
                 </div>
 
-                {/* 3. Grand Total */}
-                <div style={{ ...receiptRowStyle, fontWeight: 'bold', fontSize: '1.1rem', marginTop: '5px', paddingTop: '10px', borderTop: '2px solid #333' }}>
+                <div style={{ ...receiptRowStyle, fontWeight: '900', fontSize: '1.2rem', marginTop: '12px', paddingTop: '16px', borderTop: '2px solid #2C2C29', color: '#2C2C29' }}>
                     <span>TOTAL PAID</span>
-                    {/* 🔥 Use live finalGrandTotal */}
                     <span>{CURRENCY_SYMBOL}{finalGrandTotal.toFixed(2)}</span>
                 </div>
 
-                <div style={{ marginTop: '20px', textAlign: 'center', fontSize: '0.7rem', color: '#888' }}>
-                    <p>Thank you for choosing HOMS</p>
+                <div style={{ marginTop: '24px', textAlign: 'center', fontSize: '0.75rem', color: '#A09F9A' }}>
+                    <p>Thank you for choosing us</p>
                 </div>
 
-                <div 
-                    style={{ display: 'flex', gap: '10px', marginTop: '20px' }} 
-                    data-pdf-ignore
-                >
-                    <button 
-                        onClick={downloadPDF} 
-                        style={printButtonStyle}
-                        disabled={isDownloading}
-                    >
+                <div style={{ display: 'flex', gap: '12px', marginTop: '24px' }} data-pdf-ignore>
+                    <button onClick={downloadPDF} style={printButtonStyle} disabled={isDownloading}>
                         {isDownloading ? "Generating..." : "📩 Download Receipt (PDF)"}
                     </button>
                     <button onClick={onClose} style={closeReceiptButtonStyle}>Close</button>
@@ -138,7 +171,7 @@ const ReceiptModal = ({ order, onClose }) => {
     );
 };
 
-// --- SUB-COMPONENT: PAY BUTTON (React 19 Wrapped Callback) ---
+// --- SUB-COMPONENT: PAY BUTTON ---
 const PayButton = ({ order, email, isProcessing, onWait }) => {
     const config = {
         reference: `HOMS_${order.id.slice(-5)}_${Date.now()}`,
@@ -168,36 +201,71 @@ const PayButton = ({ order, email, isProcessing, onWait }) => {
 };
 
 function GuestTracker({ guestId, viewMode, userEmail }) {
-    // 1. INITIALIZE BASIC CONSTANTS
+    const [receptionContact, setReceptionContact] = useState('030 223 4567'); 
+    const [hotelName, setHotelName] = useState('HOMS');
+    const [logoUrl, setLogoUrl] = useState(null); 
+    const [cachedLogoBase64, setCachedLogoBase64] = useState(null); 
     const [isPushLoading, setIsPushLoading] = useState(false);
+    
     const effectiveGuestId = guestId || GUEST_ID;
     const effectiveEmail = userEmail || "guest@hotel.com";
-
-    // 2. INITIALIZE LOCAL STATES
+    
     const [isProcessing, setIsProcessing] = useState(false);
     const [viewingReceipt, setViewingReceipt] = useState(null);
     const [expandedHistoryId, setExpandedHistoryId] = useState(null);
-    
-    // ⭐ NEW: Settings UI State
     const [showSettings, setShowSettings] = useState(false);
-    // Add this near your other states
     const [confirmCancelId, setConfirmCancelId] = useState(null);
 
-    // ⭐ PERSISTENCE: Check localStorage on load, or default to true
-     // At the top of GuestTracker.jsx
-     const [alertPrefs, setAlertPrefs] = useState(() => {
-    const saved = localStorage.getItem('homs_alert_prefs');
-    return saved ? JSON.parse(saved) : { voice: true, push: false };
+    const [alertPrefs, setAlertPrefs] = useState(() => {
+        const saved = localStorage.getItem('homs_alert_prefs');
+        return saved ? JSON.parse(saved) : { voice: true, push: false };
     });
 
-// Auto-save to disk whenever a toggle is flipped
     useEffect(() => {
-    localStorage.setItem('homs_alert_prefs', JSON.stringify(alertPrefs));
-     }, [alertPrefs]);
+        localStorage.setItem('homs_alert_prefs', JSON.stringify(alertPrefs));
+    }, [alertPrefs]);
 
-    
+    const convertImgToBase64 = useCallback((url) => {
+        if (!url) return;
+        if (logoUrl === url && cachedLogoBase64) return;
 
-    // 3. DATA FETCHING
+        const img = new Image();
+        img.crossOrigin = 'anonymous'; 
+        
+        img.onload = () => {
+            const canvas = document.createElement('canvas');
+            canvas.width = img.naturalWidth * 2;
+            canvas.height = img.naturalHeight * 2;
+            
+            const ctx = canvas.getContext('2d');
+            if (ctx) {
+                ctx.imageSmoothingEnabled = true;
+                ctx.imageSmoothingQuality = 'high';
+                ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                
+                const base64Data = canvas.toDataURL('image/png', 1.0); 
+                setCachedLogoBase64(base64Data);
+            }
+        };
+        img.src = url;
+    }, [logoUrl, cachedLogoBase64]);
+
+    useEffect(() => {
+        const unsubConfig = onSnapshot(doc(db, 'config', 'hotel_settings'), (docSnap) => {
+            if (docSnap.exists()) {
+                const data = docSnap.data();
+                if (data.receptionContact) setReceptionContact(data.receptionContact);
+                if (data.hotelName) setHotelName(data.hotelName); 
+                
+                if (data.logoUrl && data.logoUrl !== logoUrl) {
+                    setLogoUrl(data.logoUrl);
+                    convertImgToBase64(data.logoUrl); 
+                }
+            }
+        });
+        return () => unsubConfig();
+    }, [logoUrl, convertImgToBase64]);
+
     const fetchActive = viewMode !== 'history' && !!effectiveGuestId;
     const { orders: activeOrders, loading: activeLoading } = useRealTimeOrders(
         'guestId', effectiveGuestId, ACTIVE_STATUSES, fetchActive
@@ -207,13 +275,11 @@ function GuestTracker({ guestId, viewMode, userEmail }) {
         'guestId', effectiveGuestId, HISTORY_STATUSES, viewMode !== 'active'
     );
 
-    // 4. MEMORY REFS
-    const lastRequestTimeRef = React.useRef(null);
-    const lastPricesRef = React.useRef({});
-    const isFirstLoadRef = React.useRef(true);
+    const lastRequestTimeRef = useRef(null);
+    const lastPricesRef = useRef({});
+    const isFirstLoadRef = useRef(true);
 
-    // --- PAYMENT OBSERVER (Updated with Voice Toggle) ---
-    React.useEffect(() => {
+    useEffect(() => {
         if (activeLoading || !activeOrders) return;
 
         if (isFirstLoadRef.current) {
@@ -230,7 +296,6 @@ function GuestTracker({ guestId, viewMode, userEmail }) {
             const requestTime = latestRequestOrder.paymentRequestedAt?.toMillis?.() || 0;
 
             if (requestTime > (lastRequestTimeRef.current || 0)) {
-                // ⭐ VOICE CHECK: Only speak if enabled in settings
                 if (alertPrefs.voice) {
                     if (window.speechSynthesis.paused) window.speechSynthesis.resume();
                     const utterance = new SpeechSynthesisUtterance("Please make payment for your order.");
@@ -244,8 +309,7 @@ function GuestTracker({ guestId, viewMode, userEmail }) {
         }
     }, [activeOrders, activeLoading, alertPrefs.voice]);
 
-    // --- PRICE OBSERVER (Updated with Voice Toggle) ---
-    React.useEffect(() => {
+    useEffect(() => {
         if (activeLoading || !activeOrders || activeOrders.length === 0) return;
 
         activeOrders.forEach(order => {
@@ -264,7 +328,6 @@ function GuestTracker({ guestId, viewMode, userEmail }) {
                     return prevP === 0 && currP > 0;
                 });
 
-                // ⭐ VOICE CHECK: Only speak if enabled in settings
                 if (containsNewPricing && alertPrefs.voice) {
                     const utterance = new SpeechSynthesisUtterance("Your order price has been updated. Please check the details.");
                     window.speechSynthesis.speak(utterance);
@@ -274,11 +337,46 @@ function GuestTracker({ guestId, viewMode, userEmail }) {
         });
     }, [activeOrders, activeLoading, alertPrefs.voice]);
 
-    // 5. EVENT HANDLERS
     const toggleHistoryDetails = (orderId) => {
         setExpandedHistoryId(prevId => (prevId === orderId ? null : orderId));
     };
 
+    // --- 🚀 NEW: DATA DELETION HANDLERS ---
+    const handleDeleteSingleHistory = async (e, orderId, receiptCode) => {
+        e.stopPropagation(); 
+        
+        if (window.confirm(`Are you sure you want to remove Order #${receiptCode} from your view history permanently?`)) {
+            try {
+                const orderRef = doc(db, 'orders', orderId);
+                await deleteDoc(orderRef); 
+                alert("Order history item removed successfully.");
+            } catch (error) {
+                console.error("Single delete failed:", error);
+                alert("Failed to delete history item: " + error.message);
+            }
+        }
+    };
+
+    const handleClearAllHistory = async () => {
+        if (historyOrders.length === 0) return;
+        
+        const message = `⚠️ WARNING: This will permanently wipe all ${historyOrders.length} history items from your portal view. This action cannot be undone.\n\nDo you wish to proceed?`;
+        
+        if (window.confirm(message)) {
+            try {
+                const deletePromises = historyOrders.map(order => {
+                    const orderRef = doc(db, 'orders', order.id);
+                    return deleteDoc(orderRef);
+                });
+                
+                await Promise.all(deletePromises);
+                alert("All history logs cleared successfully!");
+            } catch (error) {
+                console.error("Bulk history clear failed:", error);
+                alert("Failed to clear complete history: " + error.message);
+            }
+        }
+    };
 
     const handlePaymentSuccess = async (reference, orderId) => {
         setIsProcessing(true);
@@ -312,97 +410,86 @@ function GuestTracker({ guestId, viewMode, userEmail }) {
     };
     
     const renderFinancials = (order) => {
-    // 1. DYNAMIC CALCULATION: Always calculate from the items list
-    const itemsSubtotal = order.items?.reduce((sum, item) => {
-        return sum + (item.qty * (item.price || 0));
-    }, 0) || 0;
+        const itemsSubtotal = order.items?.reduce((sum, item) => {
+            return sum + (item.qty * (item.price || 0));
+        }, 0) || 0;
 
-    // 2. EXTRACT CHARGES: Use stored values or defaults
-    const serviceCharge = order.financials?.serviceCharge || 0;
-    
-    // 3. FINAL TOTAL: The math is now locked and accurate
-    const calculatedGrandTotal = itemsSubtotal + serviceCharge;
+        const serviceCharge = order.financials?.serviceCharge || 0;
+        const calculatedGrandTotal = itemsSubtotal + serviceCharge;
+        const isPaid = order.paymentStatus === 'paid';
 
-    const isPaid = order.paymentStatus === 'paid';
-
-    return (
-        <div style={breakdownCardStyle}>
-            <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', borderBottom: '1px solid #ced4da', paddingBottom: '5px', marginBottom: '10px'}}>
-                <h4 style={{margin:0}}>Price Breakdown</h4>
-                <span style={{
-                    fontSize: '0.65rem', padding: '2px 8px', borderRadius: '10px', 
-                    backgroundColor: isPaid ? '#e6ffe6' : '#fff5f5', color: isPaid ? '#008000' : '#e74c3c',
-                    fontWeight: 'bold', border: `1px solid ${isPaid ? '#008000' : '#e74c3c'}`
-                }}>
-                    {isPaid ? 'PAID' : 'UNPAID'}
-                </span>
-            </div>
-            
-            <ul style={itemizedListStyle}>
-                {order.items?.map((item, index) => (
-                    <li key={item.id || index} style={itemizedListItemStyle}>
-                        <span>{item.qty}x **{item.name}**</span>
-                        {item.price === 0 && item.type === 'special' ? (
-                            <span style={{ color: '#800080', fontWeight: 'bold' }}>Price TBD</span>
-                        ) : (
-                            <span>{CURRENCY_SYMBOL}{(item.qty * (item.price || 0)).toFixed(2)}</span>
-                        )}
-                    </li>
-                ))}
-            </ul>
-
-            <div style={breakdownSummaryStyle}>
-                <div style={breakdownRowStyle}>
-                    <span>Subtotal (Items):</span>
-                    {/* Use our calculated total here */}
-                    <span>{CURRENCY_SYMBOL}{itemsSubtotal.toFixed(2)}</span>
+        return (
+            <div className="responsive-breakdown-card" style={breakdownCardStyle}>
+                <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', borderBottom: '1px solid #EAE8E1', paddingBottom: '10px', marginBottom: '14px' }}>
+                    <h4 style={{ margin:0, color: '#333330', fontSize: '0.95rem', fontWeight: '700' }}>Price Breakdown</h4>
+                    <span style={{
+                        fontSize: '0.7rem', padding: '4px 10px', borderRadius: '20px', 
+                        backgroundColor: isPaid ? '#E8F5E9' : '#FFFDF5', color: isPaid ? '#2E7D32' : '#D4AF37',
+                        fontWeight: '800', border: `1px solid ${isPaid ? '#A5D6A7' : '#F3E5AB'}`
+                    }}>
+                        {isPaid ? 'PAID' : 'UNPAID'}
+                    </span>
                 </div>
                 
-                {serviceCharge > 0 && (
+                <ul style={itemizedListStyle}>
+                    {order.items?.map((item, index) => (
+                        <li key={item.id || index} style={itemizedListItemStyle}>
+                            <span>{item.qty}x <strong style={{ color: '#333330' }}>{item.name}</strong></span>
+                            {item.price === 0 && item.type === 'special' ? (
+                                <span style={{ color: '#8E24AA', fontWeight: '800' }}>Price TBD</span>
+                            ) : (
+                                <span style={{ fontWeight: '600' }}>{CURRENCY_SYMBOL}{(item.qty * (item.price || 0)).toFixed(2)}</span>
+                            )}
+                        </li>
+                    ))}
+                </ul>
+
+                <div style={breakdownSummaryStyle}>
                     <div style={breakdownRowStyle}>
-                        <span>Service Charge:</span>
-                        <span>{CURRENCY_SYMBOL}{serviceCharge.toFixed(2)}</span>
+                        <span>Subtotal (Items):</span>
+                        <span style={{ fontWeight: '600', color: '#333330' }}>{CURRENCY_SYMBOL}{itemsSubtotal.toFixed(2)}</span>
+                    </div>
+                    
+                    {serviceCharge > 0 && (
+                        <div style={breakdownRowStyle}>
+                            <span>Service Charge:</span>
+                            <span style={{ fontWeight: '600', color: '#333330' }}>{CURRENCY_SYMBOL}{serviceCharge.toFixed(2)}</span>
+                        </div>
+                    )}
+                    
+                    <div style={grandTotalRowStyle}>
+                        <strong>GRAND TOTAL:</strong>
+                        <strong>{CURRENCY_SYMBOL}{calculatedGrandTotal.toFixed(2)}</strong>
+                    </div>
+                </div>
+
+                {order.paymentStatus === 'unpaid' && calculatedGrandTotal > 0 && (
+                    <div style={{ marginTop: '16px' }}>
+                        <PayButton 
+                            order={{...order, financials: { ...order.financials, grandTotal: calculatedGrandTotal }}} 
+                            email={effectiveEmail} 
+                            isProcessing={isProcessing} 
+                            onWait={handlePaymentSuccess} 
+                        />
                     </div>
                 )}
-                
-                <div style={grandTotalRowStyle}>
-                    <strong>GRAND TOTAL:</strong>
-                    {/* Use our calculated grand total here */}
-                    <strong>{CURRENCY_SYMBOL}{calculatedGrandTotal.toFixed(2)}</strong>
-                </div>
+
+                {isPaid && (
+                    <button style={receiptButtonStyle} onClick={() => setViewingReceipt(order)}>
+                        📄 View & Download Receipt
+                    </button>
+                )}
             </div>
-
-            {/* Use calculatedGrandTotal to decide if we show the Pay Button */}
-            {order.paymentStatus === 'unpaid' && calculatedGrandTotal > 0 && (
-                <div style={{marginTop: '15px'}}>
-                    <PayButton 
-                        order={{...order, financials: { ...order.financials, grandTotal: calculatedGrandTotal }}} 
-                        email={effectiveEmail} 
-                        isProcessing={isProcessing} 
-                        onWait={handlePaymentSuccess} 
-                    />
-                </div>
-            )}
-
-            {isPaid && (
-                <button style={receiptButtonStyle} onClick={() => setViewingReceipt(order)}>
-                    📄 View & Download Receipt
-                </button>
-            )}
-        </div>
-    );
-};
+        );
+    };
 
     const renderOrderStatus = (order) => {
         const statusDetail = getStatusDetails(order.currentStatus);
         const orderTime = formatTime(order.orderTime);
         
-        // 1. FIND CONFIRMATION TIME (Status 2 in history)
         const confirmedEntry = order.statusHistory?.find(entry => entry.status === 2);
         const confirmationTime = confirmedEntry ? formatTime(confirmedEntry.timestamp) : 'Awaiting Confirmation...';
 
-        // 2. FIND SERVER NAME (From current order or status history)
-        // We check the top level first, then look for the person who dispatched it (Status 5)
         const serverName = order.serverName || 
                           order.statusHistory?.find(entry => entry.status === 5)?.serverName || 
                           order.statusHistory?.find(entry => entry.status === 6)?.serverName || 
@@ -411,143 +498,146 @@ function GuestTracker({ guestId, viewMode, userEmail }) {
         const displayLocation = order.orderType === 'Dining Hall' ? order.dispatchLocation : order.roomNumber;
 
         return (
-            <div style={{ borderWidth: '2px', borderStyle: 'solid', borderColor: statusDetail.color, padding: '15px', borderRadius: '8px', margin: '15px 0', backgroundColor: '#fff', boxShadow: '0 2px 4px rgba(0,0,0,0.05)' }}>
+            <div className="responsive-tracker-card" style={{ ...orderCardStyle, borderTop: `6px solid ${statusDetail.color}` }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                    <h3 style={{ margin: 0 }}>Order ID: <strong>{order.id.slice(-8).toUpperCase()}</strong></h3>
-                    <span style={{ fontSize: '0.8rem', backgroundColor: '#eee', padding: '2px 8px', borderRadius: '4px' }}>{order.orderType}</span>
+                    <h3 style={{ margin: 0, color: '#333330', fontSize: '0.95rem', fontWeight: '800' }}>
+                    Order ID: <strong style={{ color: '#2C2C29', fontWeight: '900' }}>{order.id.slice(-8).toUpperCase()}</strong>
+                    </h3>
+                    <span style={typeBadgeStyle}>{order.orderType}</span>
                 </div>
                 
-                <p>Location/Room: <strong>{displayLocation || order.roomNumber}</strong></p>
+                <p style={{ margin: '10px 0 0 0', color: '#666660', fontSize: '0.95rem' }}>
+                    Going to: <strong style={{ color: '#333330' }}>{displayLocation || order.roomNumber}</strong>
+                </p>
                 
-                <hr style={{ margin: '10px 0', border: '0', borderTop: '1px solid #eee' }}/>
+                <hr style={dividerStyle}/>
                 
                 {renderFinancials(order)}
 
                 {order.notes && (
                     <div style={notesContainerStyle}>
-                        <strong>Special Request / Allergies:</strong> 
-                        <p style={{ margin: '5px 0 0 0', fontStyle: 'italic' }}>{order.notes}</p>
+                        <strong style={{ color: '#856404', fontSize: '0.9rem' }}>Special Request / Allergies:</strong> 
+                        <p style={{ margin: '4px 0 0 0', fontStyle: 'italic', color: '#666660', fontSize: '0.9rem' }}>{order.notes}</p>
                     </div>
                 )}
 
-                <hr style={{ margin: '10px 0', border: '0', borderTop: '1px solid #eee' }}/>
+                <hr style={dividerStyle}/>
                 
-                {/* --- RESTORED TIMING & SERVER INFO --- */}
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '5px', fontSize: '0.9rem' }}>
-                    <p style={{ margin: 0 }}>📅 Ordered: <strong>{orderTime}</strong></p>
-                    <p style={{ margin: 0 }}>✅ Confirmed: <strong>{confirmationTime}</strong></p>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', fontSize: '0.9rem', color: '#666660' }}>
+                    <p style={{ margin: 0 }}>📅 Ordered: <strong style={{ color: '#333330' }}>{orderTime}</strong></p>
+                    <p style={{ margin: 0 }}>✅ Confirmed: <strong style={{ color: '#333330' }}>{confirmationTime}</strong></p>
                     
                     {order.currentStatus >= 5 && (
-                        <p style={{ margin: '5px 0 0 0', padding: '8px', backgroundColor: '#f3e5f5', borderRadius: '4px', borderLeft: '4px solid #8e24aa', fontWeight: 'bold', color: '#4a148c' }}>
-                            👤 Delivering Staff: {serverName}
-                        </p>
+                        <div style={{ 
+                            marginTop: '8px', 
+                            padding: '12px', 
+                            backgroundColor: '#FCFAF2', 
+                            borderRadius: '12px', 
+                            borderLeft: '4px solid #D4AF37',
+                            border: '1px solid #F3EDE0' 
+                        }}>
+                            <span style={{ fontWeight: '700', color: '#856404', fontSize: '0.9rem' }}>
+                                👤 Delivering Staff: {serverName}
+                            </span>
+                        </div>
                     )}
                 </div>
 
-                <h3 style={{ color: statusDetail.color, marginTop: '15px', borderTop: '1px solid #f0f0f0', paddingTop: '10px' }}>
+                <h3 style={{ 
+                    color: statusDetail.color, 
+                    marginTop: '24px', 
+                    borderTop: '1px solid #EAE8E1', 
+                    paddingTop: '16px',
+                    textAlign: 'center',
+                    fontSize: '1.15rem',
+                    fontWeight: '800'
+                }}>
                     Current Status: {statusDetail.name}
                 </h3>
                 
-                <div style={{ padding: '10px', marginTop: '15px', backgroundColor: '#fffbe0', borderRadius: '4px' }}>
-                    <p style={{ margin: '0', fontSize: '0.85rem' }}>Need help? Call Reception: <strong>{RECEPTION_CONTACT}</strong></p>
+                <div style={{ padding: '12px', marginTop: '16px', backgroundColor: '#FDFDFB', border: '1px solid #EAE8E1', borderRadius: '12px', textAlign: 'center' }}>
+                    <p style={{ margin: '0', fontSize: '0.85rem', color: '#666660' }}>
+                        Need help? Call Reception: <strong style={{ color: '#333330' }}>{receptionContact}</strong>
+                    </p>
                 </div>
 
                 {order.currentStatus === 1 && (
-    <div style={{ marginTop: '15px' }}>
-        {confirmCancelId === order.id ? (
-            <div style={{ display: 'flex', gap: '10px' }}>
-                <button 
-                    onClick={() => {
-                        cancelOrder(order.id, effectiveGuestId);
-                        setConfirmCancelId(null);
-                    }} 
-                    style={{ ...cancelButtonStyle, marginTop: 0, flex: 2 }}
-                >
-                    Confirm Cancellation?
-                </button>
-                <button 
-                    onClick={() => setConfirmCancelId(null)} 
-                    style={{ ...closeReceiptButtonStyle, flex: 1 }}
-                >
-                    Keep Order
-                </button>
-            </div>
-        ) : (
-            <button 
-                onClick={() => setConfirmCancelId(order.id)} 
-                style={cancelButtonStyle} 
-                disabled={isProcessing}
-            >
-                ❌ Cancel Order (Before Confirmation)
-            </button>
-        )}
-    </div>
-)}
+                    <div style={{ marginTop: '20px' }}>
+                        {confirmCancelId === order.id ? (
+                            <div style={{ display: 'flex', gap: '10px' }}>
+                                <button 
+                                    onClick={() => {
+                                        cancelOrder(order.id, effectiveGuestId);
+                                        setConfirmCancelId(null);
+                                    }} 
+                                    style={{ ...cancelButtonStyle, marginTop: 0, flex: 2, backgroundColor: '#FFF5F5' }}
+                                >
+                                    Confirm Cancellation?
+                                </button>
+                                <button 
+                                    onClick={() => setConfirmCancelId(null)} 
+                                    style={{ ...closeReceiptButtonStyle, flex: 1, borderRadius: '12px' }}
+                                >
+                                    Keep Order
+                                </button>
+                            </div>
+                        ) : (
+                            <button onClick={() => setConfirmCancelId(order.id)} style={cancelButtonStyle} disabled={isProcessing}>
+                                ❌ Cancel Order (Before Confirmation)
+                            </button>
+                        )}
+                    </div>
+                )}
             </div>
         );
     };
     
-   // --- ⚙️ SHARED SETTINGS COMPONENT (Add this helper first) ---
-  // --- ⚙️ SETTINGS HELPER (Rules of Hooks Compliant) ---
     const renderSettingsToggle = () => (
-        <div style={{ position: 'relative', marginBottom: '15px', textAlign: 'right' }}>
+        <div className="responsive-settings-container" style={{ position: 'relative', marginBottom: '24px', width: '100%', maxWidth: '680px', textAlign: 'right' }}>
             <button onClick={() => setShowSettings(!showSettings)} style={settingsToggleButtonStyle}>
                 {showSettings ? '✕ Close' : '⚙️ Alert Settings'}
             </button>
             {showSettings && (
                 <div style={settingsDropdownStyle}>
-                    <h4 style={{ margin: '0 0 10px 0', fontSize: '0.9rem', borderBottom: '1px solid #eee', paddingBottom: '5px' }}>
+                    <h4 style={{ margin: '0 0 12px 0', fontSize: '0.9rem', color: '#333330', borderBottom: '1px solid #EAE8E1', paddingBottom: '8px', fontWeight: '700' }}>
                         Notification Prefs
                     </h4>
                     
-                    {/* 🎙️ VOICE ALERTS TOGGLE */}
                     <label style={settingLabelStyle}>
                         <span>Voice Alerts</span>
-                        <input 
-                            type="checkbox" 
-                            checked={alertPrefs.voice} 
-                            onChange={() => {
-                                const newValue = !alertPrefs.voice;
-                                setAlertPrefs(prev => ({ ...prev, voice: newValue }));
-                                localStorage.setItem('algrace_voice_pref', newValue);
-                            }} 
-                        />
+                        <input type="checkbox" checked={alertPrefs.voice} onChange={() => setAlertPrefs(prev => ({ ...prev, voice: !alertPrefs.voice }))} />
                     </label>
 
-                    {/* 📱 PUSH NOTIFICATIONS TOGGLE */}
                     <label style={{ ...settingLabelStyle, opacity: isPushLoading ? 0.5 : 1 }}>
                         <span>Push Notifications</span>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
-                            {isPushLoading && <span style={{ fontSize: '10px', color: '#666' }}>Syncing...</span>}
+                            {isPushLoading && <span style={{ fontSize: '10px', color: '#888883' }}>Syncing...</span>}
                             <input 
                                 type="checkbox" 
                                 disabled={isPushLoading} 
                                 checked={alertPrefs.push} 
                                 onChange={async () => {
                                     if (isPushLoading) return;
-
                                     if (!alertPrefs.push) {
                                         const activeOrderId = activeOrders?.[0]?.id;
                                         if (activeOrderId) {
-                                            setIsPushLoading(true); // Start Lock
+                                            setIsPushLoading(true); 
                                             try {
                                                 const token = await requestNotificationPermission(activeOrderId);
                                                 if (token) {
                                                     setAlertPrefs(prev => ({ ...prev, push: true }));
-                                                    localStorage.setItem('algrace_push_pref', 'true');
                                                     alert("🚀 Push Notifications Enabled!");
                                                 }
                                             } catch (err) {
                                                 console.error("Push Error:", err);
                                             } finally {
-                                                setIsPushLoading(false); // End Lock
+                                                setIsPushLoading(false); 
                                             }
                                         } else {
                                             alert("Please place an order first to enable push alerts.");
                                         }
                                     } else {
                                         setAlertPrefs(prev => ({ ...prev, push: false }));
-                                        localStorage.setItem('algrace_push_pref', 'false');
                                     }
                                 }} 
                             />
@@ -557,122 +647,265 @@ function GuestTracker({ guestId, viewMode, userEmail }) {
             )}
         </div>
     );
+
     // --- 1. RENDER: ACTIVE ORDERS ---
     if (viewMode === 'active') {
         if (activeLoading) return <div style={pageContainerStyle}>Loading active orders...</div>;
         return (
-            <div style={pageContainerStyle}>
-                {renderSettingsToggle()} {/* 👈 Logic: Included here */}
+            <div className="responsive-page-container" style={pageContainerStyle}>
+                <ResponsiveTrackerStyles />
+                {renderSettingsToggle()}
                 {activeOrders.length === 0 ? (
                     <p style={emptyStateStyle}>No active orders. Place a new order to start tracking!</p>
                 ) : (
-                    activeOrders.map(order => <div key={order.id}>{renderOrderStatus(order)}</div>)
+                    activeOrders.map(order => <div key={order.id} style={{ width: '100%', display: 'flex', justifyContent: 'center' }}>{renderOrderStatus(order)}</div>)
                 )}
-                {viewingReceipt && <ReceiptModal order={viewingReceipt} onClose={() => setViewingReceipt(null)} />}
+                {viewingReceipt && (
+                    <ReceiptModal 
+                        order={viewingReceipt} 
+                        onClose={() => setViewingReceipt(null)} 
+                        hotelName={hotelName} 
+                        logoUrl={logoUrl} 
+                    />
+                )}
             </div>
         );
     }
     
     // --- 2. RENDER: ORDER HISTORY ---
-    if (viewMode === 'history') {
-        if (historyLoading) return <div style={pageContainerStyle}>Loading order history...</div>;
-        
+  if (viewMode === 'history') {
+        if (historyLoading) return <div style={pageContainerStyle}>Loading luxury history ledger...</div>;
         return (
-            <div style={pageContainerStyle}>
-                {/* ❌ REMOVED: renderSettingsToggle() from here */}
+            <div className="responsive-page-container" style={{ ...pageContainerStyle, padding: '24px 16px' }}>
+                <ResponsiveTrackerStyles />
                 
-                {historyOrders.length === 0 ? (
-                    <p style={emptyStateStyle}>No order history found.</p>
-                ) : (
-                    historyOrders.map(order => (
-                        <div key={order.id} style={historyCardStyle} onClick={() => toggleHistoryDetails(order.id)}>
-                            <div style={historyHeaderStyle}>
-                                <div style={historyHeaderRowStyle}>
-                                    <span style={{ fontWeight: 'bold' }}>Order #{order.id.slice(-5).toUpperCase()}</span> 
-                                    <span style={historyTotalStyle}>Total: {CURRENCY_SYMBOL}{(order.financials?.grandTotal || 0).toFixed(2)}</span>
-                                </div>
-                                <span style={historyToggleStyle}>{expandedHistoryId === order.id ? '▲ Hide' : '▼ Show'}</span>
-                            </div>
-                            {expandedHistoryId === order.id && renderFinancials(order)}
+                {/* 🗑️ PREMIUM GLOBAL UTILITY CONTROL BLOCK */}
+                {historyOrders.length > 0 && (
+                    <div style={{ width: '100%', maxWidth: '640px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px', borderBottom: '1px solid #EAE8E1', paddingBottom: '12px' }}>
+                        <div style={{ textAlign: 'left' }}>
+                            <h4 style={{ margin: 0, fontSize: '0.85rem', fontWeight: '800', color: '#121212', letterSpacing: '0.5px', textTransform: 'uppercase' }}>Past Transactions</h4>
+                            <span style={{ fontSize: '0.75rem', color: '#787873', fontWeight: '500' }}>Reviewing {historyOrders.length} historical statements</span>
                         </div>
-                    ))
+                        <button 
+                            onClick={handleClearAllHistory}
+                            style={{
+                                padding: '10px 16px',
+                                backgroundColor: '#FFF5F5',
+                                color: '#E53E3E',
+                                border: '1px solid #FED7D7',
+                                borderRadius: '12px',
+                                fontSize: '0.8rem',
+                                fontWeight: '800',
+                                cursor: 'pointer',
+                                transition: 'all 0.2s ease',
+                                textTransform: 'uppercase',
+                                letterSpacing: '0.5px'
+                            }}
+                        >
+                            💥 Clear All Logs
+                        </button>
+                    </div>
                 )}
-                {viewingReceipt && <ReceiptModal order={viewingReceipt} onClose={() => setViewingReceipt(null)} />}
+
+                {historyOrders.length === 0 ? (
+                    <p style={emptyStateStyle}>No historical transaction fingerprints captured yet.</p>
+                ) : (
+                    <div style={{ width: '100%', maxWidth: '640px', display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                        {historyOrders.map(order => {
+                            // 🗓️ Parse temporal components dynamically
+                            const rawDate = order.orderTime?.toDate ? order.orderTime.toDate() : new Date(order.orderTime);
+                            const formattedDate = rawDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+                            const formattedTime = rawDate.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+
+                            const serverName = order.serverName || "N/A";
+                            const receiptCode = order.receiptId || order.id.slice(-8).toUpperCase();
+                            
+                            // 🎨 Dynamically determine state pill token color palettes
+                            const isCancelled = order.currentStatus === 0;
+                            const statusLabel = isCancelled ? "Cancelled" : "Completed";
+                            const badgeBg = isCancelled ? '#FFF5F5' : '#E6F4EA';
+                            const badgeColor = isCancelled ? '#C53030' : '#137333';
+                            const badgeBorder = isCancelled ? '#FEB7B7' : '#A3E2B8';
+
+                            return (
+                                <div 
+                                    key={order.id} 
+                                    className="responsive-tracker-card" 
+                                    style={{
+                                        ...historyCardStyle,
+                                        borderRadius: '20px',
+                                        padding: '20px',
+                                        backgroundColor: '#FFFFFF',
+                                        border: expandedHistoryId === order.id ? '1px solid #121212' : '1px solid #EAE8E1',
+                                        boxShadow: expandedHistoryId === order.id ? '0 12px 30px rgba(0,0,0,0.06)' : '0 4px 12px rgba(0,0,0,0.015)',
+                                        transition: 'all 0.25s cubic-bezier(0.4, 0, 0.2, 1)'
+                                    }} 
+                                    onClick={() => toggleHistoryDetails(order.id)}
+                                >
+                                    <div style={historyHeaderStyle}>
+                                        
+                                        {/* TOP CONTROL LINE ROW */}
+                                        <div style={historyHeaderRowStyle}>
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                                                {/* Premium Token Code Pill */}
+                                                <span style={{ 
+                                                    fontWeight: '900', 
+                                                    color: '#121212', 
+                                                    fontSize: '0.9rem', 
+                                                    letterSpacing: '1px',
+                                                    fontFamily: 'monospace',
+                                                    padding: '4px 10px',
+                                                    borderRadius: '8px',
+                                                    backgroundColor: '#F4F3EE',
+                                                    border: '1px solid #E2E0D5'
+                                                }}>
+                                                    #{receiptCode}
+                                                </span>
+                                                {/* Core Status Label Token */}
+                                                <span style={{
+                                                    fontSize: '0.7rem',
+                                                    fontWeight: '800',
+                                                    padding: '3px 8px',
+                                                    borderRadius: '6px',
+                                                    backgroundColor: badgeBg,
+                                                    color: badgeColor,
+                                                    border: `1px solid ${badgeBorder}`,
+                                                    textTransform: 'uppercase',
+                                                    letterSpacing: '0.3px'
+                                                }}>
+                                                    {statusLabel}
+                                                </span>
+                                            </div>
+                                            
+                                            {/* Grand Total Value Tag */}
+                                            <span style={{ 
+                                                fontWeight: '900', 
+                                                color: '#1A5235', 
+                                                fontSize: '1.1rem',
+                                                fontFamily: "'Inter', sans-serif"
+                                            }}>
+                                                {CURRENCY_SYMBOL}{(order.financials?.grandTotal || 0).toFixed(2)}
+                                            </span>
+                                        </div>
+                                        
+                                        {/* TEMPORAL METADATA TIMELINE LINE */}
+                                        <div style={{ display: 'flex', gap: '14px', fontSize: '0.8rem', color: '#787873', marginTop: '10px', fontWeight: '500', alignItems: 'center' }}>
+                                            <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>📅 {formattedDate}</span>
+                                            <span style={{ width: '4px', height: '4px', borderRadius: '50%', backgroundColor: '#D8D6D0' }} />
+                                            <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>⏱️ {formattedTime}</span>
+                                        </div>
+
+                                        {/* INTERACTIVE CONTROLS BOTTOM SUB-BAR */}
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', width: '100%', alignItems: 'center', marginTop: '14px', borderTop: '1px solid #F4F3EE', paddingTop: '12px' }}>
+                                            <span style={{ 
+                                                fontSize: '0.8rem', 
+                                                color: expandedHistoryId === order.id ? '#121212' : '#787873', 
+                                                fontWeight: '800', 
+                                                display: 'flex', 
+                                                alignItems: 'center', 
+                                                gap: '4px' 
+                                            }}>
+                                                {expandedHistoryId === order.id ? '▲ Collapse Receipt Details' : '▼ Expand Folio Breakdown'}
+                                            </span>
+                                            
+                                            {/* Elegant Destructive Wipe Log Token Button */}
+                                            <button
+                                                onClick={(e) => handleDeleteSingleHistory(e, order.id, receiptCode)}
+                                                style={{
+                                                    background: 'none',
+                                                    border: 'none',
+                                                    color: '#A0A09A',
+                                                    fontSize: '0.75rem',
+                                                    fontWeight: '700',
+                                                    cursor: 'pointer',
+                                                    padding: '6px 12px',
+                                                    borderRadius: '8px',
+                                                    transition: 'all 0.2s ease',
+                                                    display: 'flex',
+                                                    alignItems: 'center',
+                                                    gap: '4px'
+                                                }}
+                                                onMouseEnter={(e) => { e.target.style.color = '#E53E3E'; e.target.style.backgroundColor = '#FFF5F5'; }}
+                                                onMouseLeave={(e) => { e.target.style.color = '#A0A09A'; e.target.style.backgroundColor = 'transparent'; }}
+                                            >
+                                                🗑️ Wipe Log
+                                            </button>
+                                        </div>
+                                    </div>
+
+                                    {/* EXPANDED INTERFACE AREA CONTENT BLOCK */}
+                                    {expandedHistoryId === order.id && (
+                                        <div style={{ marginTop: '16px', animation: 'fadeIn 0.25s ease-out', borderTop: '1px dashed #D8D6D0', paddingTop: '16px' }} onClick={(e) => e.stopPropagation()}>
+                                            
+                                            {/* LUXURY METADATA PROFILE LEAD LEDGER CHIP GRID CONTAINER */}
+                                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '16px', padding: '12px 14px', backgroundColor: '#FBFBF9', borderRadius: '14px', border: '1px solid #EAE8E1' }}>
+                                                <div>
+                                                    <span style={{ display: 'block', textTransform: 'uppercase', fontSize: '0.65rem', fontWeight: '800', color: '#A09F9A', letterSpacing: '0.8px', marginBottom: '2px' }}>Timestamp</span>
+                                                    <strong style={{ color: '#2C2C29', fontSize: '0.85rem', fontWeight: '700' }}>{formattedDate} • {formattedTime}</strong>
+                                                </div>
+                                                <div>
+                                                    <span style={{ display: 'block', textTransform: 'uppercase', fontSize: '0.65rem', fontWeight: '800', color: '#A09F9A', letterSpacing: '0.8px', marginBottom: '2px' }}>Delivering Attendant</span>
+                                                    <strong style={{ color: serverName !== 'N/A' ? '#0047AB' : '#2C2C29', fontSize: '0.85rem', fontWeight: '700' }}>
+                                                        {serverName !== 'N/A' ? `👤 ${serverName}` : '🛎️ Front Desk Despatch'}
+                                                    </strong>
+                                                </div>
+                                            </div>
+
+                                            {/* Core Pricing Calculations Wrapper */}
+                                            {renderFinancials(order)}
+                                        </div>
+                                    )}
+                                </div>
+                            );
+                        })}
+                    </div>
+                )}
+                
+                {viewingReceipt && (
+                    <ReceiptModal 
+                        order={viewingReceipt} 
+                        onClose={() => setViewingReceipt(null)} 
+                        hotelName={hotelName} 
+                        logoUrl={logoUrl} 
+                    />
+                )}
             </div>
         );
     }
 
-    // --- 3. THE SAFETY CATCH ---
     return null;
 }
 
-// --- STYLES (Kept Original as requested) ---
-const modalOverlayStyle = { position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.8)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 2000, padding: '20px' };
-const receiptContainerStyle = { backgroundColor: '#fff', padding: '25px', borderRadius: '12px', width: '100%', maxWidth: '380px', boxShadow: '0 20px 40px rgba(0,0,0,0.4)', position: 'relative', overflow: 'hidden' };
-const receiptRowStyle = { display: 'flex', justifyContent: 'space-between', marginBottom: '8px', fontSize: '0.9rem' };
-const printButtonStyle = { flex: 1, padding: '10px', backgroundColor: '#3498db', color: '#fff', border: 'none', borderRadius: '6px', fontWeight: 'bold', cursor: 'pointer' };
-const closeReceiptButtonStyle = { padding: '10px', backgroundColor: '#eee', color: '#333', border: 'none', borderRadius: '6px', cursor: 'pointer' };
-const closeReceiptXStyle = { position: 'absolute', top: '10px', right: '10px', border: 'none', background: 'none', fontSize: '1.2rem', cursor: 'pointer' };
-const paystackButtonStyle = { width: '100%', padding: '12px', backgroundColor: '#09a5db', color: '#fff', border: 'none', borderRadius: '5px', fontWeight: 'bold', cursor: 'pointer', fontSize: '1rem' };
-const receiptButtonStyle = { width: '100%', padding: '10px', backgroundColor: '#f8f9fa', color: '#333', border: '1px solid #ddd', borderRadius: '5px', fontWeight: 'bold', cursor: 'pointer', marginTop: '10px', fontSize: '0.85rem' };
-const emptyStateStyle = { padding: '10px', backgroundColor: '#fff', borderRadius: '6px' };
-const breakdownCardStyle = { padding: '10px', border: '1px solid #eee', borderRadius: '4px', marginBottom: '10px', backgroundColor: '#fafafa' };
-const breakdownSummaryStyle = { marginTop: '10px', paddingTop: '5px', borderTop: '1px dotted #ced4da', fontSize: '0.95rem' };
-const notesContainerStyle = { padding: '10px', backgroundColor: '#fff3cd', border: '1px solid #ffeeba', borderRadius: '4px', marginBottom: '10px' };
-const pageContainerStyle = { backgroundColor: '#f0f4f7', margin: '0 auto', boxSizing: 'border-box', padding: '10px' };
-const historyCardStyle = { margin: '10px 0', padding: '10px', border: '1px solid #ddd', borderRadius: '8px', backgroundColor: '#fff', fontSize: '0.9em', boxShadow: '0 2px 4px rgba(0,0,0,0.05)', cursor: 'pointer' };
-const historyHeaderStyle = { display: 'flex', flexDirection: 'column', gap: '4px', paddingBottom: '5px', alignItems: 'flex-start' };
-const historyHeaderRowStyle = { display: 'flex', justifyContent: 'space-between', width: '100%' };
-const historyTotalStyle = { fontWeight: 'bold', color: '#008000', backgroundColor: '#e6ffe6', padding: '2px 6px', borderRadius: '4px' };
-const historyToggleStyle = { marginTop: '5px', fontSize: '0.8em', color: '#007bff' };
-const historyDetailStyle = { paddingTop: '5px', borderTop: '1px solid #eee', marginTop: '10px' };
-const itemizedListStyle = { listStyle: 'none', padding: '0', margin: '0 0 10px 0', borderBottom: '1px dotted #ced4da', paddingBottom: '5px' };
-const itemizedListItemStyle = { display: 'flex', justifyContent: 'space-between', padding: '3px 0', fontSize: '0.95em' };
-const breakdownRowStyle = { display: 'flex', justifyContent: 'space-between', padding: '3px 0', color: '#343a40' };
-const grandTotalRowStyle = { ...breakdownRowStyle, borderTop: '2px double #343a40', paddingTop: '8px', fontSize: '1.1rem', fontWeight: 'bold' };
-const cancelButtonStyle = { padding: '10px 15px', backgroundColor: '#dc3545', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', marginTop: '15px', width: '100%', fontWeight: 'bold' };
-// --- 🎨 ALERT SETTINGS STYLES ---
+// --- MASTER STYLES ---
+const modalOverlayStyle = { position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(20, 20, 19, 0.75)', backdropFilter: 'blur(6px)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 2000, padding: '20px' };
+const receiptContainerStyle = { backgroundColor: '#FFFFFF', padding: '32px', borderRadius: '24px', width: '100%', maxWidth: '400px', boxShadow: '0 25px 50px rgba(12, 12, 10, 0.12)', border: '1px solid #EAE8E1', position: 'relative', overflow: 'hidden', boxSizing: 'border-box' };
+const receiptRowStyle = { display: 'flex', justifyContent: 'space-between', marginBottom: '10px', fontSize: '0.9rem', color: '#333330' };
+const printButtonStyle = { flex: 1, padding: '14px', backgroundColor: '#2C2C29', color: '#FFFFFF', border: 'none', borderRadius: '12px', fontWeight: '700', cursor: 'pointer', transition: 'background 0.2s ease', fontSize: '0.9rem' };
+const closeReceiptButtonStyle = { padding: '14px', backgroundColor: '#F4F3EE', color: '#4A4A45', border: 'none', borderRadius: '12px', cursor: 'pointer', fontWeight: '700', transition: 'background 0.2s ease', fontSize: '0.9rem' };
+const closeReceiptXStyle = { position: 'absolute', top: '20px', right: '20px', border: 'none', background: 'none', fontSize: '1.2rem', cursor: 'pointer', color: '#A09F9A' };
 
-const settingsToggleButtonStyle = {
-    background: '#ffffff',
-    border: '1px solid #dee2e6',
-    borderRadius: '20px',
-    padding: '6px 14px',
-    fontSize: '0.8rem',
-    fontWeight: 'bold',
-    color: '#495057',
-    cursor: 'pointer',
-    boxShadow: '0 2px 4px rgba(0,0,0,0.05)',
-    display: 'inline-flex',
-    alignItems: 'center',
-    gap: '6px',
-    transition: 'all 0.2s ease'
-};
-
-const settingsDropdownStyle = {
-    position: 'absolute',
-    top: '40px',
-    right: '0',
-    backgroundColor: '#ffffff',
-    border: '1px solid #dee2e6',
-    borderRadius: '12px',
-    padding: '15px',
-    boxShadow: '0 8px 24px rgba(0,0,0,0.12)',
-    zIndex: 1000,
-    width: '210px',
-    textAlign: 'left',
-    animation: 'fadeIn 0.2s ease-out'
-};
-
-const settingLabelStyle = {
-    display: 'flex',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    margin: '12px 0',
-    fontSize: '0.85rem',
-    cursor: 'pointer',
-    color: '#212529',
-    fontWeight: '500'
-};
+const pageContainerStyle = { backgroundColor: '#FAF9F5', boxSizing: 'border-box', padding: '20px', width: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', color: '#333330', fontFamily: "'Inter', sans-serif" };
+const orderCardStyle = { width: '100%', maxWidth: '680px', backgroundColor: '#FFFFFF', padding: '32px', borderRadius: '24px', marginBottom: '24px', boxShadow: '0 10px 40px rgba(20, 20, 18, 0.04)', border: '1px solid #EAE8E1', boxSizing: 'border-box', animation: 'fadeSlideUp 0.5s ease-out' };
+const breakdownCardStyle = { padding: '22px', backgroundColor: '#FDFDFB', borderRadius: '16px', marginBottom: '16px', border: '1px solid #EAE8E1', boxSizing: 'border-box' };
+const paystackButtonStyle = { width: '100%', padding: '16px', backgroundColor: '#2C2C29', color: '#FFFFFF', border: 'none', borderRadius: '14px', fontWeight: '800', cursor: 'pointer', fontSize: '1rem', marginTop: '8px', boxShadow: '0 6px 20px rgba(44, 44, 41, 0.12)', transition: 'all 0.2s ease' };
+const receiptButtonStyle = { width: '100%', padding: '14px', backgroundColor: '#F4F3EE', color: '#2C2C29', border: '1px solid #EAE8E1', borderRadius: '12px', fontWeight: '700', cursor: 'pointer', marginTop: '16px', fontSize: '0.85rem', transition: 'all 0.2s ease' };
+const cancelButtonStyle = { padding: '14px', backgroundColor: 'transparent', color: '#C94A4A', border: '1px solid #EEDCDD', borderRadius: '12px', cursor: 'pointer', marginTop: '16px', width: '100%', fontWeight: '700', fontSize: '0.85rem', transition: 'all 0.2s ease' };
+const notesContainerStyle = { padding: '14px 16px', backgroundColor: '#FCFAF2', borderLeft: '4px solid #D4AF37', border: '1px solid #F3EDE0', borderRadius: '12px', marginBottom: '14px', boxSizing: 'border-box' };
+const historyCardStyle = { width: '100%', boxSizing: 'border-box', padding: '24px', borderRadius: '20px', backgroundColor: '#FFFFFF', border: '1px solid #EAE8E1', boxShadow: '0 4px 20px rgba(20, 20, 18, 0.03)', cursor: 'pointer', transition: 'all 0.2s ease' };
+const historyHeaderStyle = { display: 'flex', flexDirection: 'column', gap: '8px', alignItems: 'flex-start' };
+const historyHeaderRowStyle = { display: 'flex', justifyContent: 'space-between', width: '100%', alignItems: 'center' };
+const historyTotalStyle = { fontWeight: '800', color: '#2E7D32', backgroundColor: '#E8F5E9', padding: '4px 12px', borderRadius: '20px', fontSize: '0.85rem', border: '1px solid #C8E6C9' };
+const historyToggleStyle = { fontSize: '0.8rem', color: '#787873', fontWeight: '700', marginTop: '2px' };
+const itemizedListStyle = { listStyle: 'none', padding: '0', margin: '0 0 16px 0', borderBottom: '1px solid #EAE8E1', paddingBottom: '12px' };
+const itemizedListItemStyle = { display: 'flex', justifyContent: 'space-between', padding: '6px 0', fontSize: '0.95rem', color: '#666660' };
+const breakdownSummaryStyle = { marginTop: '12px', paddingTop: '4px', fontSize: '0.95rem' };
+const breakdownRowStyle = { display: 'flex', justifyContent: 'space-between', padding: '5px 0', color: '#666660' };
+const grandTotalRowStyle = { display: 'flex', justifyContent: 'space-between', marginTop: '12px', borderTop: '2px solid #2C2C29', paddingTop: '14px', fontSize: '1.15rem', fontWeight: '900', color: '#2C2C29' };
+const emptyStateStyle = { padding: '40px 20px', textAlign: 'center', color: '#888883', fontSize: '0.95rem', backgroundColor: '#FFFFFF', borderRadius: '24px', border: '1px solid #EAE8E1', width: '100%', maxWidth: '680px', boxShadow: '0 4px 20px rgba(20,20,18,0.02)', boxSizing: 'border-box' };
+const typeBadgeStyle = { fontSize: '0.75rem', backgroundColor: '#F4F3EE', padding: '5px 12px', borderRadius: '20px', fontWeight: '800', color: '#555550', letterSpacing: '0.5px', textTransform: 'uppercase' };
+const dividerStyle = { margin: '22px 0', border: '0', borderTop: '1px solid #EAE8E1' };
+const settingsToggleButtonStyle = { background: '#FFFFFF', border: '1px solid #EAE8E1', borderRadius: '20px', padding: '8px 16px', fontSize: '0.85rem', fontWeight: '700', color: '#4A4A45', cursor: 'pointer', boxShadow: '0 4px 12px rgba(20, 20, 18, 0.03)', display: 'inline-flex', alignItems: 'center', gap: '8px', transition: 'all 0.2s ease' };
+const settingsDropdownStyle = { position: 'absolute', top: '48px', right: '0', backgroundColor: '#FFFFFF', border: '1px solid #EAE8E1', borderRadius: '18px', padding: '20px', boxShadow: '0 12px 40px rgba(20, 20, 18, 0.08)', zIndex: 1000, width: '230px', textAlign: 'left', animation: 'fadeIn 0.2s ease-out', boxSizing: 'border-box' };
+const settingLabelStyle = { display: 'flex', justifyContent: 'space-between', alignItems: 'center', margin: '14px 0', fontSize: '0.85rem', cursor: 'pointer', color: '#555550', fontWeight: '600' };
 
 export default GuestTracker;

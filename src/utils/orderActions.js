@@ -1,12 +1,11 @@
-import { doc, updateDoc, arrayUnion, deleteDoc, runTransaction, Timestamp, addDoc, collection, serverTimestamp } from 'firebase/firestore'; 
+import { doc, updateDoc, arrayUnion, deleteDoc, runTransaction, Timestamp, addDoc, collection, serverTimestamp, setDoc } from 'firebase/firestore'; 
 import { db } from '../config/firebase'; 
 
-const ROOM_SERVICE_FLAT_CHARGE = 30.00; 
-
 // --- Helper: Recalculate Financials ---
-function recalculateFinancials(items, orderType) {
+// 🚀 UPDATED: Now dynamically accepts a custom flat charge from your settings hook!
+function recalculateFinancials(items, orderType, customFlatCharge = 0.00) {
     const subtotal = items.reduce((sum, item) => sum + (item.price * item.qty), 0);
-    const serviceCharge = (orderType === 'Room Service') ? ROOM_SERVICE_FLAT_CHARGE : 0.00;
+    const serviceCharge = (orderType === 'Room Service') ? Number(customFlatCharge) : 0.00;
     const grandTotal = subtotal + serviceCharge;
     const hasUnpricedCustomItems = items.some(item => item.type === 'special' && item.price === 0);
     
@@ -27,13 +26,58 @@ function getStatusName(statusId) {
     return names[statusId] || "Unknown";
 }
 
-// --- NEW: KITCHEN BROADCAST WITH 2-DAY TTL ---
-/**
- * Sends a message to the kitchen that automatically deletes after 2 days.
- */
+// --- 🚀 CENTRALIZED ORDER CREATION ENGINE ---
+export async function createOrder(rawOrderPayload) {
+    try {
+        const ordersRef = collection(db, "orders");
+        const newOrderDocRef = doc(ordersRef);
+        const generatedId = newOrderDocRef.id;
+
+        // 💥 UPDATED: Safely extracts the incoming flat calculation fee passed from the form state!
+        const passedServiceCharge = rawOrderPayload.serviceCharge || 0.00;
+
+        // Clean out the loose utility parameter so it doesn't clutter your Firestore document schema root
+        const cleanPayloadData = { ...rawOrderPayload };
+        delete cleanPayloadData.serviceCharge;
+
+        // Run calculations with the live dashboard value
+        const derivedFinancials = recalculateFinancials(
+            cleanPayloadData.items, 
+            cleanPayloadData.orderType, 
+            passedServiceCharge
+        );
+
+        const finalPayload = {
+            ...cleanPayloadData,
+            id: generatedId,
+            receiptId: generatedId.slice(-8).toUpperCase(),
+            currentStatus: 1, 
+            paymentStatus: cleanPayloadData.paymentStatus || 'unpaid',
+            financials: derivedFinancials,
+            orderTime: serverTimestamp(),
+            statusHistory: [
+                {
+                    status: 1,
+                    statusName: getStatusName(1),
+                    timestamp: Timestamp.now(),
+                    updatedBy: `Guest Session: ${cleanPayloadData.guestId || 'Anonymous'}`,
+                    note: "Order initialized via customer platform.",
+                }
+            ]
+        };
+
+        await setDoc(newOrderDocRef, finalPayload);
+        return { success: true, orderId: generatedId, receiptId: finalPayload.receiptId };
+
+    } catch (error) {
+        console.error("Order Generation Error:", error);
+        throw new Error(`Failed to place order: ${error.message}`);
+    }
+}
+
+// --- KITCHEN BROADCAST WITH 2-DAY TTL ---
 export async function broadcastToKitchen(message, sender = "Front Desk") {
     try {
-        // Calculate expiration: 48 hours from now
         const twoDaysInMs = 2 * 24 * 60 * 60 * 1000;
         const expirationDate = new Date(Date.now() + twoDaysInMs);
 
@@ -43,7 +87,6 @@ export async function broadcastToKitchen(message, sender = "Front Desk") {
             date: new Date().toISOString().split('T')[0],
             time: new Date().toLocaleTimeString(),
             createdAt: serverTimestamp(),
-            // The "Janitor" field for Firestore TTL
             expireAt: Timestamp.fromDate(expirationDate) 
         });
         return { success: true };
@@ -54,7 +97,8 @@ export async function broadcastToKitchen(message, sender = "Front Desk") {
 }
 
 // --- 1. ATOMIC PRICE UPDATE (Transaction) ---
-export async function updateCustomItemPrices(orderId, updatedItems, orderType, frontDeskUserId) {
+// 🚀 UPDATED: Front desk updates also pass down through this recalculation loop seamlessly!
+export async function updateCustomItemPrices(orderId, updatedItems, orderType, frontDeskUserId, currentSystemCharge = 0.00) {
     const orderRef = doc(db, "orders", orderId);
 
     try {
@@ -62,7 +106,7 @@ export async function updateCustomItemPrices(orderId, updatedItems, orderType, f
             const orderDoc = await transaction.get(orderRef);
             if (!orderDoc.exists()) throw new Error("Order not found.");
 
-            const newFinancials = recalculateFinancials(updatedItems, orderType);
+            const newFinancials = recalculateFinancials(updatedItems, orderType, currentSystemCharge);
             const historyEntry = {
                 status: -1,
                 statusName: getStatusName(-1),

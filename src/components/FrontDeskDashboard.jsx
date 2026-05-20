@@ -9,15 +9,6 @@ const ACTIVE_MONITORING_STATUSES = [1, 2, 3, 4, 5, 6];
 const CURRENT_FRONT_DESK_ID = "FD_User_A"; 
 const CURRENCY_SYMBOL = 'GH₵'; 
 
-const STATUS_BACKUP = {
-    1: { label: 'PENDING', color: '#3498db' },
-    2: { label: 'CONFIRMED', color: '#2ecc71' },
-    3: { label: 'PREPARING', color: '#f1c40f' },
-    4: { label: 'READY', color: '#9b59b6' },
-    5: { label: 'DELIVERING', color: '#1abc9c' },
-    6: { label: 'DELIVERING', color: '#27ae60' } 
-};
-
 const formatTimeLong = (timestampOrDate) => {
     if (!timestampOrDate) return 'N/A';
     let date = timestampOrDate.toDate ? timestampOrDate.toDate() : new Date(timestampOrDate); 
@@ -29,8 +20,12 @@ const formatTimeLong = (timestampOrDate) => {
 
 function FrontDeskDashboard() {
     const [activeHubView, setActiveHubView] = useState('operations');
-    const { orders: activeData, loading: activeLoading } = useRealTimeOrders(null, null, null);
-    
+    const { orders: activeData, loading: activeLoading } = useRealTimeOrders(
+        'currentStatus', 
+        null, 
+        ACTIVE_MONITORING_STATUSES, 
+        activeHubView === 'operations'
+    );    
     const [searchTerm, setSearchTerm] = useState('');
     const [activeFilterStatus, setActiveFilterStatus] = useState(0); 
 
@@ -53,6 +48,22 @@ function FrontDeskDashboard() {
     const prevPaidIdsRef = useRef(new Set());
     const [justPaidId, setJustPaidId] = useState(null); 
 
+    const [receptionContact, setReceptionContact] = useState('030 223 4567');
+    const [hotelName, setHotelName] = useState('HOMS');
+    const [logoUrl, setLogoUrl] = useState(null);
+
+    useEffect(() => {
+        const unsubConfig = onSnapshot(doc(db, 'config', 'hotel_settings'), (docSnap) => {
+            if (docSnap.exists()) {
+                const data = docSnap.data();
+                if (data.receptionContact) setReceptionContact(data.receptionContact);
+                if (data.hotelName) setHotelName(data.hotelName); 
+                if (data.logoUrl) setLogoUrl(data.logoUrl);       
+            }
+        });
+        return () => unsubConfig();
+    }, []);
+
     useEffect(() => {
         const q = query(collection(db, 'kitchen_notes'), orderBy('createdAt', 'desc'));
         const unsubscribe = onSnapshot(q, (snapshot) => {
@@ -63,30 +74,27 @@ function FrontDeskDashboard() {
     }, []);
 
     // --- PAYMENT NOTIFICATION OBSERVER ---
-   // --- UPDATED: PAYMENT NOTIFICATION OBSERVER ---
-useEffect(() => {
-    if (activeLoading) return;
-    
-    const currentPaidIds = new Set(activeData.filter(o => o.paymentStatus === 'paid').map(o => o.id));
-    const newlyPaidId = [...currentPaidIds].find(id => !prevPaidIdsRef.current.has(id));
+    useEffect(() => {
+        if (activeLoading) return;
+        
+        const currentPaidIds = new Set(activeData.filter(o => o.paymentStatus === 'paid').map(o => o.id));
+        const newlyPaidId = [...currentPaidIds].find(id => !prevPaidIdsRef.current.has(id));
 
-    if (newlyPaidId) {
-        // 1. Play the Chime
-        const chime = new Audio('https://assets.mixkit.co/active_storage/sfx/1017/1017-preview.mp3');
-        chime.play().catch(() => {});
+        if (newlyPaidId) {
+            const chime = new Audio('https://assets.mixkit.co/active_storage/sfx/1017/1017-preview.mp3');
+            chime.play().catch(() => {});
 
-        // 2. Add Voice Alert
-        if (voiceEnabled) {
-            const utterance = new SpeechSynthesisUtterance("A new payment has been received.");
-            utterance.rate = 1.0;
-            window.speechSynthesis.speak(utterance);
+            if (voiceEnabled) {
+                const utterance = new SpeechSynthesisUtterance("A new payment has been received.");
+                utterance.rate = 1.0;
+                window.speechSynthesis.speak(utterance);
+            }
+
+            setJustPaidId(newlyPaidId);
+            setTimeout(() => setJustPaidId(null), 5000);
         }
-
-        setJustPaidId(newlyPaidId);
-        setTimeout(() => setJustPaidId(null), 5000);
-    }
-    prevPaidIdsRef.current = currentPaidIds;
-}, [activeData, activeLoading, voiceEnabled]); // Added voiceEnabled to dependencies
+        prevPaidIdsRef.current = currentPaidIds;
+    }, [activeData, activeLoading, voiceEnabled]);
 
     // --- VOICE ALERT LOGIC ---
     useEffect(() => {
@@ -131,50 +139,45 @@ useEffect(() => {
     };
 
     const handleSavePrice = async (orderId, itemIndex) => {
-    const priceValue = tempPrices[`${orderId}-${itemIndex}`];
-    const newPrice = parseFloat(priceValue);
-    
-    if (isNaN(newPrice) || newPrice < 0) return alert("Please enter a valid price");
-    
-    const order = activeData.find(o => o.id === orderId);
-    if (!order) return;
-
-    // 1. Create the updated items array
-    const updatedItems = [...order.items];
-    updatedItems[itemIndex] = { ...updatedItems[itemIndex], price: newPrice };
-
-    // 2. 🔥 RECALCULATE TOTALS (The Missing Step)
-    const newSubtotal = updatedItems.reduce((sum, item) => {
-        return sum + (item.qty * (item.price || 0));
-    }, 0);
-
-    const serviceCharge = order.financials?.serviceCharge || 0;
-    const newGrandTotal = newSubtotal + serviceCharge;
-
-    try {
-        const orderRef = doc(db, 'orders', orderId);
+        const priceValue = tempPrices[`${orderId}-${itemIndex}`];
+        const newPrice = parseFloat(priceValue);
         
-        // 3. UPDATE EVERYTHING: Items AND the Financial fields
-        await updateDoc(orderRef, {
-            items: updatedItems,
-            // Use dot notation to update nested fields without overwriting the whole object
-            "financials.subtotal": newSubtotal,
-            "financials.grandTotal": newGrandTotal,
-            priceUpdatedAt: serverTimestamp(),
-            lastUpdatedBy: CURRENT_FRONT_DESK_ID
-        });
+        if (isNaN(newPrice) || newPrice < 0) return alert("Please enter a valid price");
+        
+        const order = activeData.find(o => o.id === orderId);
+        if (!order) return;
 
-        // 4. Cleanup UI state
-        setEditingPriceIndex(null);
-        const newTempPrices = { ...tempPrices };
-        delete newTempPrices[`${orderId}-${itemIndex}`];
-        setTempPrices(newTempPrices);
+        const updatedItems = [...order.items];
+        updatedItems[itemIndex] = { ...updatedItems[itemIndex], price: newPrice };
 
-    } catch (e) { 
-        console.error("Price Update Error:", e);
-        alert("Error: " + e.message); 
-    }
-};
+        const newSubtotal = updatedItems.reduce((sum, item) => {
+            return sum + (item.qty * (item.price || 0));
+        }, 0);
+
+        const serviceCharge = order.financials?.serviceCharge || 0;
+        const newGrandTotal = newSubtotal + serviceCharge;
+
+        try {
+            const orderRef = doc(db, 'orders', orderId);
+            await updateDoc(orderRef, {
+                items: updatedItems,
+                "financials.subtotal": newSubtotal,
+                "financials.grandTotal": newGrandTotal,
+                priceUpdatedAt: serverTimestamp(),
+                lastUpdatedBy: CURRENT_FRONT_DESK_ID
+            });
+
+            setEditingPriceIndex(null);
+            const newTempPrices = { ...tempPrices };
+            delete newTempPrices[`${orderId}-${itemIndex}`];
+            setTempPrices(newTempPrices);
+
+        } catch (e) { 
+            console.error("Price Update Error:", e);
+            alert("Error: " + e.message); 
+        }
+    };
+
     const requestGuestPayment = async (orderId) => {
         try {
             await updateDoc(doc(db, 'orders', orderId), {
@@ -205,14 +208,15 @@ useEffect(() => {
 
     const renderOrderCard = (order) => {
         const details = getStatusDetails(order.currentStatus);
-        const label = details?.label || STATUS_BACKUP[order.currentStatus]?.label || "ACTIVE";
-        const color = details?.color || STATUS_BACKUP[order.currentStatus]?.color || "#ccc";
+        const label = details?.name || "Active";
+        const color = details?.color || "#A09F9A";
+        
         const displayLocation = order.orderType === 'Dining Hall' ? order.dispatchLocation : order.roomNumber;
         const confirmedEntry = order.statusHistory?.find(entry => entry.status === 2);
         const confirmationTime = confirmedEntry ? formatTimeLong(confirmedEntry.timestamp) : 'Not Confirmed';
 
         const isNewlyPaid = justPaidId === order.id;
-        const hasUnpricedItems = order.items.some(i => (i.price || 0) <= 0);
+        const hasUnpricedItems = order.items?.some(i => (i.price || 0) <= 0);
         const pStatus = (order.paymentStatus || 'unpaid').toUpperCase();
         const pColor = order.paymentStatus === 'paid' ? '#2ecc71' : '#e74c3c';
 
@@ -223,8 +227,11 @@ useEffect(() => {
                 backgroundColor: isNewlyPaid ? '#f0fff4' : '#fff',
                 transition: 'all 0.5s ease'
             }}>
+                {/* 🚀 FIXED: Cleaned up nested wrappers and structural duplicates */}
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                    <h4 style={{fontSize: '0.75rem', marginBottom: '8px', fontFamily: 'monospace', wordBreak: 'break-all'}}>ID: {order.id}</h4>
+                    <h4 style={{ fontSize: '0.8rem', fontWeight: '900', marginBottom: '8px', fontFamily: 'monospace', color: '#2C2C29' }} title={`Full DB ID: ${order.id}`}>
+                        #{order.id.slice(-8).toUpperCase()}
+                    </h4>
                     {isNewlyPaid ? <span style={newlyPaidBadgeStyle}>NEWLY PAID ✅</span> : (order.prepTime && <span style={prepTimeBadgeStyle}>⏱️ {order.prepTime}</span>)}
                 </div>
                 
@@ -281,7 +288,22 @@ useEffect(() => {
     };
 
     return (
-        <div style={{ padding: '15px', backgroundColor: '#f4f7f6', minHeight: '100vh' }}>
+       <div style={{ padding: '24px', backgroundColor: '#FAF9F5', minHeight: '100vh', fontFamily: "'Inter', sans-serif" }}>
+            
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', backgroundColor: '#fff', padding: '16px 28px', borderRadius: '16px', marginBottom: '24px', boxShadow: '0 4px 20px rgba(20, 20, 18, 0.02)', border: '1px solid #EAE8E1' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+                    {logoUrl ? (
+                        <img src={logoUrl} alt={`${hotelName} Logo`} style={{ maxHeight: '42px', width: 'auto', objectFit: 'contain' }} />
+                    ) : (
+                        <span style={{ fontSize: '1.8rem' }}>🏨</span>
+                    )}
+                    <div>
+                        <h2 style={{ margin: 0, fontSize: '1.15rem', fontWeight: '900', color: '#2C2C29', textTransform: 'uppercase', letterSpacing: '0.5px' }}>{hotelName} Command Center</h2>
+                        <p style={{ margin: 0, fontSize: '0.75rem', color: '#A09F9A', fontWeight: '500' }}>Front Desk Operations Hub • Reception Line: {receptionContact}</p>
+                    </div>
+                </div>
+            </div>
+
             <div style={hubNav}>
                 <button onClick={() => setActiveHubView('operations')} style={activeHubView === 'operations' ? activeHubBtn : hubBtn}>📋 OPERATIONS</button>
                 <button onClick={() => setActiveHubView('history')} style={activeHubView === 'history' ? activeHubBtn : hubBtn}>📜 HISTORY</button>
@@ -303,12 +325,17 @@ useEffect(() => {
                         </div>
                     </div>
                     <div style={wideGridContainer}>
-                        {[1, 2, 3, 4, 5].map(st => (
-                            <div key={st} style={columnStyle}>
-                                <h3 style={colHeadStyle}>{STATUS_BACKUP[st]?.label || 'DELIVERING'}</h3>
-                                {masterFilteredOrders.filter(o => st === 5 ? [5,6].includes(o.currentStatus) : o.currentStatus === st).map(renderOrderCard)}
-                            </div>
-                        ))}
+                        {[1, 2, 3, 4, 5].map(st => {
+                            const colDetails = getStatusDetails(st);
+                            const columnTitle = colDetails?.name || (st === 5 ? 'DELIVERING' : 'ACTIVE');
+                            
+                            return (
+                                <div key={st} style={columnStyle}>
+                                    <h3 style={{...colHeadStyle, borderBottom: `3px solid ${colDetails?.color || '#ccc'}`, color: '#2C2C29', paddingBottom: '8px', marginBottom: '12px'}}>{columnTitle.toUpperCase()}</h3>
+                                    {masterFilteredOrders.filter(o => st === 5 ? [5,6].includes(o.currentStatus) : o.currentStatus === st).map(renderOrderCard)}
+                                </div>
+                            );
+                        })}
                     </div>
                 </>
             )}
@@ -324,8 +351,10 @@ useEffect(() => {
                                 <div key={o.id} style={historyCardStyle} onClick={() => setExpandedOrderId(isExpanded ? null : o.id)}>
                                     <div style={historyHeaderStyle}>
                                         <div style={historyHeaderRowStyle}>
-                                            <div style={{display: 'flex', flexDirection: 'column', gap: '2px'}}>
-                                                <span style={{ fontWeight: 'bold', fontSize: '0.85rem', fontFamily: 'monospace', color: '#1e293b' }}>FULL ID: {o.id}</span>
+                                            <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                                                <span style={{ fontWeight: '900', fontSize: '0.85rem', fontFamily: 'monospace', color: '#2C2C29' }} title={`Full DB ID: ${o.id}`}>
+                                                    #{o.id.slice(-8).toUpperCase()}
+                                                </span>
                                                 <span style={{ fontSize: '0.9rem', color: '#2c3e50', fontWeight: '600' }}>Location: {displayLoc}</span>
                                             </div>
                                             <span style={historyTotalStyle}>{CURRENCY_SYMBOL}{(o.financials?.grandTotal || 0).toFixed(2)}</span>
@@ -355,6 +384,7 @@ useEffect(() => {
                                                     <div style={grandTotalRowStyle}><strong>GRAND TOTAL:</strong><strong>{CURRENCY_SYMBOL}{o.financials?.grandTotal?.toFixed(2)}</strong></div>
                                                 </div>
                                             </div>
+                                            {/* 🚀 FIXED: Swapped 'order.orderTime' to loop parameter identifier 'o.orderTime' to block crashes */}
                                             <p style={{ marginTop: '10px', fontSize: '0.85rem' }}>Ordered: {formatTimeLong(o.orderTime)} | Server: {o.serverName || 'N/A'}</p>
                                         </div>
                                     )}

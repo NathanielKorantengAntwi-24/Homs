@@ -1,0 +1,12 @@
+/* If you have an index.css or App.css, add this. 
+   If not, we will handle it via JS styles below */
+body, html {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    overflow-x: hidden; /* Prevents horizontal scroll white gaps */
+    background-color: #FAF9F6 !important;
+}
+
+
