@@ -17,5 +17,14 @@ export default defineConfig({
       host: 'localhost', 
       protocol: 'ws',
     },
+    
+    proxy: {
+      '/api/recommendations': {
+        // Points directly to your active local Firebase Emulator Function instance path
+        target: 'http://127.0.0.1:5001/homs-system-d71d5/africa-south1/recommendations',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api\/recommendations/, ''),
+      }
+    }
   }
 })

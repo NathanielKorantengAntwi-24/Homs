@@ -1,23 +1,18 @@
 import { GoogleGenAI } from "@google/genai";
 
-// THE KEY LIVES SECURELY HIDDEN AS A PRIVATE SERVER-SIDE PROCESS VARIABLE
-const apiKey = process.env.GEMINI_API_KEY;
+// 🔐 Initializes the client directly using your secure Vite environment variable
+const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
 const ai = new GoogleGenAI({ apiKey });
 
-export default async function handler(req, res) {
-    if (req.method !== 'POST') {
-        return res.status(405).json({ error: 'Method Not Allowed' });
+export async function requestPersonalizedMealSuggestions(historyOrders, flatMenuItemsList) {
+    // Prevent empty or uninitialized states from firing API calls
+    if (!historyOrders || historyOrders.length === 0 || !flatMenuItemsList || flatMenuItemsList.length === 0) {
+        return [];
     }
 
     try {
-        const { historyOrders, menuItems } = req.body;
-
-        // Diagnostic terminal readout log to track parsing stability
-        console.log("📥 Server handling request payload. History entries:", historyOrders?.length, "Menu records:", menuItems?.length);
-
-        if (!historyOrders || historyOrders.length === 0 || !menuItems || menuItems.length === 0) {
-            return res.status(200).json([]);
-        }
+        // Diagnostic log inside your browser dev console
+        console.log("📥 Client executing Gemini payload. History entries:", historyOrders.length, "Menu records:", flatMenuItemsList.length);
 
         // 1. Compile order historical logs cleanly
         const historySnapshot = historyOrders.map(order => {
@@ -33,9 +28,8 @@ export default async function handler(req, res) {
             return `- Past Order Snapshot: [${itemsList}] via ${type}`;
         }).join("\n");
 
-        // 2. ✅ FIXED: Bulletproof Menu Snapshot parsing mapping fallbacks
-        const menuSnapshot = menuItems.map(item => {
-            // Checks item.id, item._id, or creates a slug fallback from the name string
+        // 2. Bulletproof Menu Snapshot parsing mapping fallbacks
+        const menuSnapshot = flatMenuItemsList.map(item => {
             const itemId = item.id || item._id || (item.name ? item.name.toLowerCase().replace(/\s+/g, '_') : 'unknown_code');
             const itemName = item.name || item.itemName || 'Unnamed Special';
             const itemCategory = item.category || 'OTHER';
@@ -60,10 +54,9 @@ CRITICAL RULES:
 3. Output your response strictly as a valid JSON array containing only the matching string IDs of your selections. Do not return markdown wrapping strings or conversational filler text.
 
 EXPECTED OUTPUT FORMAT:
-["id_1", "id_2"]
-        `;
+["id_1", "id_2"]`;
 
-        // 4. Fire compute query pipelines to Gemini
+        // 4. Fire compute query pipelines directly to Gemini via the client SDK
         const response = await ai.models.generateContent({
             model: "gemini-2.5-flash",
             contents: structuralPrompt,
@@ -81,12 +74,12 @@ EXPECTED OUTPUT FORMAT:
         }
 
         const recommendedIds = JSON.parse(sanitizedJson);
-        console.log("🎯 Compiled Recommendation ID map on server instance:", recommendedIds);
+        console.log("🎯 Compiled Recommendation ID map on client instance:", recommendedIds);
 
-        return res.status(200).json(recommendedIds);
+        return recommendedIds;
 
     } catch (error) {
-        console.error("❌ Server-side AI Recommendation processing error:", error);
-        return res.status(500).json([]);
+        console.error("❌ Client-side AI Recommendation processing error:", error);
+        return [];
     }
 }
