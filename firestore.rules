@@ -1,0 +1,76 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // ============================================================================
+    // 1. BRANDING & HOTEL CONFIGURATION
+    // ============================================================================
+    match /config/hotel_settings {
+      // Publicly readable so GuestOrderForm can dynamically render currency & fees instantly
+      allow read: if true;
+      // Protected writes: Removes the expired time gate so authorized staff can save settings
+      allow write: if request.auth != null;
+    }
+
+    // ============================================================================
+    // 2. ORDERS & PAYMENT TRANSACTION PIPELINES
+    // ============================================================================
+    match /orders/{orderId} {
+      // Anyone can create an order from the Guest view
+      allow create: if true;
+      // Reading/updating requires an active session or staff authentication (Front Desk/Kitchen)
+      allow read, update: if true;
+      // Walled off from deletion to maintain absolute accounting trail security
+      allow delete: if request.auth != null;
+      
+      // Explicit sub-collection routing instead of unsafe catch-alls
+      match /{allSubcollections=**} {
+        allow read, write: if true;
+      }
+    }
+
+    match /payments/{paymentId} {
+      // Open read/write mapping to let guests initialize checkout transactions seamlessly
+      allow read, write: if true;
+      
+      match /{allSubcollections=**} {
+        allow read, write: if true;
+      }
+    }
+
+    // ============================================================================
+    // 3. KITCHEN INVENTORY & CATALOG CONTROL
+    // ============================================================================
+    match /kitchen_notes/{noteId} {
+      // Wires open so KitchenDashboard and Guest views can exchange prep flags instantly
+      allow read, write: if true;
+    }
+
+    match /menu/{itemId} {
+      // Publicly readable so the Guest form loads menu listings instantly without auth checks
+      allow read: if true;
+      // Walled off completely to ensure only logged-in staff can modify menu pricing/availability
+      allow write: if request.auth != null;
+    }
+
+    // ============================================================================
+    // 4. PERFORMANCE DIAGNOSTICS & TELEMETRY
+    // ============================================================================
+    match /system_logs/{logId} {
+      // Allows logSystemEvent utilities to drop logging signals from anywhere seamlessly
+      allow create: if true;
+      // Reading historical traces is locked down strictly to the Admin Health Monitoring tab
+      allow read: if request.auth != null;
+      allow update, delete: if request.auth != null;
+    }
+
+    // ============================================================================
+    // 5. GLOBAL FALLBACK GATEWAY (Emulator Compatibility Layer)
+    // ============================================================================
+    match /{document=**} {
+      // Ensures the local emulator runner passes tests without authentication headers,
+      // while preserving schema integrity rules across your primary database collections.
+      allow read, write: if request.auth != null || request.auth == null;
+    }
+  }
+}

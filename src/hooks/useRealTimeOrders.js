@@ -13,10 +13,15 @@ export function useRealTimeOrders(filterKey, filterValue, statusFilter = null, e
     }, [statusFilter]);
 
     useEffect(() => {
+        // 🔥 PERFORMANCE OPTIMIZATION: If disabled, immediately wipe state to prevent stale caching memory leaks
         if (!enabled) {
+            setOrders([]);
             setLoading(false);
             return;
         }
+
+        // Reset loading status flag to true whenever a dependency shift changes the collection targets
+        setLoading(true);
 
         let queryConstraints = [];
         const ordersRef = collection(db, "orders");

@@ -9,4 +9,23 @@ body, html {
     background-color: #FAF9F6 !important;
 }
 
+@keyframes marquee {
+    0% {
+        transform: translateX(0);
+    }
+    100% {
+        transform: translateX(-50%); /* Moves exactly half the combined container width */
+    }
+}
+
+.marquee-container {
+    display: flex;
+    width: max-content;
+    animation: marquee 25s linear infinite; /* Pure linear continuous motion */
+}
+
+/* Pause the track smoothly when a guest hovers to inspect or click a card */
+.marquee-container:hover {
+    animation-play-state: paused;
+}
 

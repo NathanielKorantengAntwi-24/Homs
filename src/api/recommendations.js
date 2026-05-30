@@ -33,7 +33,9 @@ export async function requestPersonalizedMealSuggestions(historyOrders, flatMenu
             const itemId = item.id || item._id || (item.name ? item.name.toLowerCase().replace(/\s+/g, '_') : 'unknown_code');
             const itemName = item.name || item.itemName || 'Unnamed Special';
             const itemCategory = item.category || 'OTHER';
-            const itemDesc = item.description || item.desc || 'Active kitchen inventory entry.';
+            
+            // 🔥 THE FIX: Replaced "Active kitchen inventory entry" with an elegant culinary fallback
+            const itemDesc = item.description || item.desc || `A delicious ${itemCategory.toLowerCase()} selection, handcrafted fresh from our kitchen.`;
             
             return `ID: ${itemId} | Name: ${itemName} | Category: ${itemCategory} | Description: ${itemDesc}`;
         }).join("\n");
@@ -61,6 +63,7 @@ EXPECTED OUTPUT FORMAT:
             model: "gemini-2.5-flash",
             contents: structuralPrompt,
             config: {
+                box: "application/json",
                 responseMimeType: "application/json"
             }
         });

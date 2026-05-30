@@ -6,26 +6,37 @@
  * @returns {Promise<Array>} - Array containing selected string product IDs.
  */
 export async function requestPersonalizedMealSuggestions(historyOrders, flatMenuItemsList) {
-    if (!historyOrders || historyOrders.length === 0 || !flatMenuItemsList || flatMenuItemsList.length === 0) {
-        console.log("⚠️ AI Recommender skipped: History or Menu list is empty.", { historyCount: historyOrders?.length, menuCount: flatMenuItemsList?.length });
+    // 🔥 FIXED CRITICAL GUARD: Only reject if the menu catalog data is empty.
+    // New guests with 0 past orders must pass through to receive discovery session defaults!
+    if (!flatMenuItemsList || flatMenuItemsList.length === 0) {
+        console.log("⚠️ AI Recommender skipped: Menu catalog list is empty.", { menuCount: flatMenuItemsList?.length });
         return [];
     }
 
-    try {
-        // 🔍 DIAGNOSTIC LOG: Let's see exactly what items are about to leave the browser
-        console.log("🚀 OUTBOUND AI PAYLOAD:");
-        console.log("👉 Past Orders:", JSON.stringify(historyOrders, null, 2));
-        console.log("👉 Catalog Names Sent:", flatMenuItemsList.map(m => m.name));
-        console.log("👉 Full Catalog Raw Data:", flatMenuItemsList);
+    // Fallback locally to a clean array format structure if parameter evaluates to undefined/null
+    const safeHistory = Array.isArray(historyOrders) ? historyOrders : [];
 
-        // Matches the exact folder routing endpoint file path you have set up
-        const response = await fetch('/api/recommendations', {
+    // --- ENVIRONMENT-AWARE ROUTING DYNAMICS ---
+    // Automatically flips endpoints based on whether working locally or in production
+    const isLocalhost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+    
+    const TARGET_URL = isLocalhost
+        ? 'http://127.0.0.1:5001/homs-system-d71d5/africa-south1/recommendations' // 🛠️ Local Emulator Port Loop
+        : 'https://recommendations-g6v4vdrp6a-bq.a.run.app';                     // 🚀 Live Production Cloud Run Container URL
+
+    try {
+        // 🔍 DIAGNOSTIC LOG: Watch payloads exit the client runtime
+        console.log(`🚀 OUTBOUND AI PAYLOAD (Targeting: ${isLocalhost ? 'LOCAL EMULATOR' : 'PRODUCTION SERVER'}):`);
+        console.log("👉 Past Orders Count Sent:", safeHistory.length);
+        console.log("👉 Catalog Names Sent:", flatMenuItemsList.map(m => m.name));
+
+        const response = await fetch(TARGET_URL, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
             },
             body: JSON.stringify({
-                historyOrders,
+                historyOrders: safeHistory,
                 menuItems: flatMenuItemsList
             })
         });
@@ -36,7 +47,7 @@ export async function requestPersonalizedMealSuggestions(historyOrders, flatMenu
 
         const recommendedIds = await response.json();
         
-        // 🔍 DIAGNOSTIC LOG: Let's see exactly what the backend decided
+        // 🔍 DIAGNOSTIC LOG: See exactly what data structures returned
         console.log("📥 INBOUND AI RESPONSE - Chosen IDs:", recommendedIds);
         
         return Array.isArray(recommendedIds) ? recommendedIds : [];
